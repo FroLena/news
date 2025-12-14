@@ -3,18 +3,34 @@ import asyncio
 from telethon import TelegramClient, events
 from openai import OpenAI
 
-# Берем настройки из переменных Amvera
+# 1. Получаем настройки
 API_ID = int(os.environ.get('TG_API_ID'))
 API_HASH = os.environ.get('TG_API_HASH')
 OPENAI_KEY = os.environ.get('OPENAI_API_KEY')
 
-# Каналы, которые читаем (без @)
+# Настройки каналов (без @)
 SOURCE_CHANNELS = ['rian_ru', 'rentv_channel', 'breakingmash', 'bazabazon']
-DESTINATION = 'me' # Кидать в Избранное
+DESTINATION = 'me' 
 
+# 2. Настраиваем подключение к нейросети (Умный выбор)
+# Если ключ начинается на sk-or, значит это OpenRouter
+if OPENAI_KEY.startswith("sk-or-"):
+    print("Использую настройки OpenRouter...")
+    gpt_client = OpenAI(
+        api_key=OPENAI_KEY,
+        base_url="https://openrouter.ai/api/v1"
+    )
+    # Для OpenRouter имя модели обычно с префиксом
+    AI_MODEL = "openai/gpt-4o-mini"
+else:
+    print("Использую официальный OpenAI...")
+    gpt_client = OpenAI(api_key=OPENAI_KEY)
+    AI_MODEL = "gpt-4o-mini"
+
+# 3. Запускаем Телеграм
 client = TelegramClient('amvera_session', API_ID, API_HASH)
-gpt_client = OpenAI(api_key=OPENAI_KEY)
 
+# Кэш для защиты от дублей
 processed_news = []
 
 async def rewrite_news(text):
@@ -26,7 +42,7 @@ async def rewrite_news(text):
     )
     try:
         response = gpt_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=AI_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": text}
@@ -40,19 +56,22 @@ async def rewrite_news(text):
 @client.on(events.NewMessage(chats=SOURCE_CHANNELS))
 async def handler(event):
     text = event.message.message
+    # Фильтр коротких сообщений и дублей
     if not text or len(text) < 50: return
     
-    # Защита от дублей
     if text[:50] in processed_news: return
     processed_news.append(text[:50])
     if len(processed_news) > 100: processed_news.pop(0)
 
     print(f"Новость из {event.chat.username}")
+    
     new_post = await rewrite_news(text)
     
     if new_post and "SKIP" not in new_post:
+        # Отправляем готовую новость
         await client.send_message(DESTINATION, f"{new_post}\n\nИсточник: {event.chat.title}")
+        print("✅ Пост отправлен!")
 
-print("Бот запущен!")
+print("Бот запущен! Жду новостей...")
 client.start()
 client.run_until_disconnected()
