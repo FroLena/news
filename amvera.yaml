@@ -9,4 +9,4 @@ build:
 
 run:
   scriptName: main.py
-  command: ls -la && python main.py
+  command: python -u main.py
