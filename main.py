@@ -28,24 +28,35 @@ raw_text_cache = []
 published_topics = []
 
 async def rewrite_news(text, history_topics):
-    recent_history = history_topics[-5:] 
-    history_str = "\n".join([f"- {t}" for t in recent_history])
-    
-    # Промпт стал сложнее. Мы учим его отделять опрос спецсимволами ||POLL||
+    # Если истории почти нет, не напрягаем ИИ проверкой, просто пишем
+    if len(history_topics) < 1:
+        print("🆕 История пуста, пропускаем проверку на дубли.")
+        check_duplicates = False
+        history_str = "Нет истории."
+    else:
+        check_duplicates = True
+        recent_history = history_topics[-5:] 
+        history_str = "\n".join([f"- {t}" for t in recent_history])
+        print(f"🧐 Сравниваю с:\n{history_str}")
+
+    # ИНСТРУКЦИЯ СТАЛА МЯГЧЕ
     system_prompt = (
-        f"Ты — редактор канала. История тем:\n{history_str}\n\n"
+        f"Ты — редактор новостей. \n"
+        f"История опубликованного:\n{history_str}\n\n"
         f"ИНСТРУКЦИЯ:\n"
-        f"1. Если это дубль — верни DUPLICATE. Если реклама — SKIP.\n"
-        f"2. Сократи новость (HTML). В конце: <blockquote><b>📌 Суть:</b> [вывод]</blockquote>\n"
-        f"3. ИНТЕРАКТИВ: Если новость острая/спорная/социальная — придумай опрос.\n"
-        f"   Формат добавления опроса (в самом конце текста):\n"
+        f"1. СРАВНЕНИЕ (Только если история не пуста): \n"
+        f"   - Блокируй (верни DUPLICATE) ТОЛЬКО если это АБСОЛЮТНО то же самое событие (те же цифры, те же имена).\n"
+        f"   - Если это развитие темы, новые подробности или просто похожая тема — ЭТО НЕ ДУБЛЬ! Пиши новость.\n"
+        f"   - Если сомневаешься — ПИШИ НОВОСТЬ.\n"
+        f"2. РЕКЛАМА: Если пост продает курсы, товары или просит подписаться — верни SKIP.\n"
+        f"3. ОФОРМЛЕНИЕ (HTML):\n"
+        f"   Текст новости.\n"
+        f"   <blockquote><b>📌 Суть:</b> [вывод]</blockquote>\n"
+        f"4. ОПРОС: Если тема вызывает эмоции, добавь в конце:\n"
         f"   ||POLL||\n"
-        f"   Вопрос опроса?\n"
-        f"   Ответ 1\n"
-        f"   Ответ 2\n"
-        f"   Ответ 3\n"
-        f"   (Максимум 3 варианта, коротко и с эмодзи).\n"
-        f"4. Если новость скучная (погода, курсы валют) — НЕ добавляй ||POLL||."
+        f"   Вопрос?\n"
+        f"   Вариант 1\n"
+        f"   Вариант 2"
     )
 
     try:
@@ -67,6 +78,7 @@ async def handler(event):
     if not text: text = "" 
     if len(text) < 15 and not event.message.photo: return
 
+    # Быстрый фильтр (точное совпадение текста)
     if text:
         short_hash = text[:100]
         if short_hash in raw_text_cache: return
@@ -81,55 +93,48 @@ async def handler(event):
         full_response = await rewrite_news(text, published_topics)
     
     if not full_response: return
+
+    # Логика блокировки
     if "DUPLICATE" in full_response:
-        print("❌ Дубль")
+        # Мы теперь видим в логах, что именно он ответил (иногда он пишет DUPLICATE: причина)
+        print(f"❌ ИИ решил, что это дубль. Ответ ИИ: {full_response[:50]}...")
         return
     if "SKIP" in full_response:
-        print("🗑 Реклама")
+        print("🗑 Реклама.")
         return
 
-    # --- ПАРСИНГ ОПРОСА ---
-    # Разделяем текст новости и данные опроса по нашему секретному разделителю
+    # --- ПАРСИНГ ---
     news_text = full_response
     poll_data = None
     
     if "||POLL||" in full_response:
-        parts = full_response.split("||POLL||")
-        news_text = parts[0].strip() # Чистый текст новости
-        
-        # Разбираем опрос (строки после разделителя)
-        poll_lines = parts[1].strip().split('\n')
-        if len(poll_lines) >= 3: # Должен быть вопрос и хотя бы 2 ответа
-            poll_question = poll_lines[0]
-            poll_options = [opt for opt in poll_lines[1:] if opt.strip()]
-            if len(poll_options) > 1:
-                poll_data = {"q": poll_question, "o": poll_options}
-                print("📊 Найден опрос!")
+        try:
+            parts = full_response.split("||POLL||")
+            news_text = parts[0].strip()
+            poll_lines = parts[1].strip().split('\n')
+            if len(poll_lines) >= 3:
+                poll_data = {"q": poll_lines[0], "o": [opt for opt in poll_lines[1:] if opt.strip()]}
+        except:
+            pass # Если опрос кривой, постим только текст
 
     # --- ОТПРАВКА ---
     path = None
     try:
-        # 1. Отправляем саму новость (с фото или без)
         if event.message.photo:
             path = await event.download_media()
             await client.send_file(DESTINATION, path, caption=news_text, parse_mode='html')
         else:
             await client.send_message(DESTINATION, news_text, parse_mode='html')
         
-        # 2. Если есть опрос — кидаем его следом
         if poll_data:
-            await asyncio.sleep(1) # Пауза 1 сек для красоты
-            await client.send_poll(
-                DESTINATION,
-                question=poll_data["q"],
-                options=poll_data["o"]
-            )
-            print("📊 Опрос опубликован")
+            await asyncio.sleep(1)
+            await client.send_poll(DESTINATION, question=poll_data["q"], options=poll_data["o"])
 
-        print("✅ Пост готов!")
+        print("✅ Пост опубликован!")
         
-        summary = news_text[:80].replace('\n', ' ')
-        published_topics.append(summary)
+        # Сохраняем в историю очищенный от HTML текст (чтобы ИИ было проще сравнивать)
+        clean_summary = news_text.replace('<blockquote>', '').replace('</blockquote>', '').replace('<b>', '').replace('</b>', '')[:100]
+        published_topics.append(clean_summary)
         if len(published_topics) > 10: published_topics.pop(0)
 
     except Exception as e:
@@ -138,6 +143,6 @@ async def handler(event):
         if path and os.path.exists(path):
             os.remove(path)
 
-print("Бот запущен! (Режим: HTML + Анти-дубль + УМНЫЕ ОПРОСЫ)")
+print("Бот запущен! (Режим: МЯГКИЙ ФИЛЬТР)")
 client.start()
 client.run_until_disconnected()
