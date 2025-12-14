@@ -1,7 +1,7 @@
 import os
 import asyncio
 import json
-import httpx # <--- Используем современную библиотеку для запросов
+import httpx
 from telethon import TelegramClient, events, types, functions
 from openai import OpenAI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -34,7 +34,7 @@ client = TelegramClient('amvera_session', API_ID, API_HASH)
 raw_text_cache = []
 published_topics = []
 
-# --- ГЕНЕРАЦИЯ КАРТИНКИ (НОВЫЙ МЕТОД HTTPX) ---
+# --- ГЕНЕРАЦИЯ КАРТИНКИ ---
 async def generate_image(prompt_text):
     clean_prompt = prompt_text.replace('||', '').replace('R:', '').strip()
     print(f"🎨 Рисую (Flux): {clean_prompt[:50]}...")
@@ -53,25 +53,16 @@ async def generate_image(prompt_text):
         "size": "1024x1024"
     }
     
-    # Используем асинхронный клиент с таймаутом 30 секунд
     async with httpx.AsyncClient(timeout=30.0) as http_client:
         try:
             response = await http_client.post(url, headers=headers, json=data)
-            
             if response.status_code == 200:
-                result = response.json()
-                return result['data'][0]['url']
+                return response.json()['data'][0]['url']
             else:
-                # Если ошибка, попробуем прочитать тело ответа, чтобы понять причину
-                error_body = response.text
-                print(f"⚠️ Ошибка API OpenRouter ({response.status_code}): {error_body[:200]}")
+                print(f"⚠️ Ошибка API OpenRouter ({response.status_code}): {response.text[:200]}")
                 return None
-                
-        except httpx.RequestError as e:
-            print(f"⚠️ Ошибка сети при запросе картинки: {e}")
-            return None
         except Exception as e:
-            print(f"⚠️ Неизвестная ошибка генерации: {e}")
+            print(f"⚠️ Ошибка сети: {e}")
             return None
 
 # --- ПОДКАСТ ---
@@ -110,26 +101,27 @@ async def send_evening_podcast():
     except Exception as e:
         print(f"❌ Ошибка подкаста: {e}")
 
-# --- AI РЕДАКТОР ---
+# --- AI РЕДАКТОР (ИСПРАВЛЕННЫЙ: ТОЛЬКО ФАКТЫ) ---
 async def rewrite_news(text, history_topics):
     recent_history = history_topics[-5:] if len(history_topics) > 0 else []
     history_str = "\n".join([f"- {t}" for t in recent_history]) if recent_history else "Нет истории."
 
     system_prompt = (
-        f"Ты — главный редактор новостного канала «Сухой остаток». История тем: {history_str}\n\n"
+        f"Ты — строгий редактор новостей. История тем: {history_str}\n\n"
         f"ФОРМАТ ОТВЕТА СТРОГО: ТЕКСТ ||| ПРОМПТ_КАРТИНКИ\n\n"
         f"=== ЧАСТЬ 1: ТЕКСТ (Russian HTML) ===\n"
-        f"1. ФИЛЬТРЫ: Реклама/Продажи/Казино -> верни слово SKIP. Дубликаты событий -> верни DUPLICATE.\n"
-        f"2. СТИЛЬ (Инфостиль): Пиши жестко, коротко, фактурно. Убирай вводные слова. Сразу к делу.\n"
-        f"3. ЗАГОЛОВОК: Придумай цепляющий заголовок, выдели его жирным (<b>Заголовок</b>).\n"
-        f"4. СТРУКТУРА: Заголовок -> 2-3 абзаца самой сути -> Цитата (если есть, через <i></i>) -> Вывод.\n"
-        f"5. В КОНЦЕ ОБЯЗАТЕЛЬНО: <blockquote><b>📌 Суть:</b> [одно предложение, самый главный вывод]</blockquote>\n"
-        f"6. РЕАКЦИИ: В самое начало текста добавь код реакции, например ||R:🔥|| (Выбери: 🔥, 🤡, ⚡️, 😢, 👍).\n"
-        f"7. ОПРОСЫ: Если новость вызывает споры, добавь в конец ||POLL||.\n\n"
+        f"1. ЗАПРЕТ НА ОТСЕБЯТИНУ: Используй ТОЛЬКО факты из исходного текста. Не придумывай цитаты, выводы, детали или мнения, которых нет в источнике. Если информации мало — пиши мало.\n"
+        f"2. ФИЛЬТРЫ: Реклама/Продажи/Казино -> верни слово SKIP. Дубликаты событий -> верни DUPLICATE.\n"
+        f"3. ОФОРМЛЕНИЕ: \n"
+        f"   - Жирный заголовок (<b>Заголовок</b>).\n"
+        f"   - ОБЯЗАТЕЛЬНО: После заголовка сделай перенос строки (Enter).\n"
+        f"   - Далее текст новости.\n"
+        f"4. В КОНЦЕ: <blockquote><b>📌 Суть:</b> [Краткий итог, только факты]</blockquote>\n"
+        f"5. РЕАКЦИИ: В самое начало текста добавь код реакции: ||R:🔥|| (Выбери: 🔥, 🤡, ⚡️, 😢, 👍).\n"
+        f"6. ОПРОСЫ: Если нужно, в конец ||POLL||.\n\n"
         f"=== ЧАСТЬ 2: ПРОМПТ КАРТИНКИ (English) ===\n"
         f"- Опиши сцену как режиссер кино. Style: 'Hyperrealistic documentary photo, award-winning journalism, cinematic lighting, 8k, highly detailed'.\n"
         f"- НЕ пиши текст на картинках.\n"
-        f"- ПРИМЕР ОТВЕТА: ||R:🔥|| <b>Пожар в Москве</b>... ||| A hyperrealistic photo of firefighters battling a massive fire at night in Moscow."
     )
 
     try:
@@ -178,7 +170,6 @@ async def handler(event):
         print("✅ Промпт для картинки найден!")
     else:
         news_text = raw_text.strip()
-        print("⚠️ Промпт не найден (будет только текст или авто-промпт).")
 
     reaction = None
     if "||R:" in news_text:
@@ -199,7 +190,7 @@ async def handler(event):
             if len(lines) >= 3: poll_data = {"q": lines[0], "o": [o for o in lines[1:] if o.strip()]}
         except: pass
 
-    # Fallback
+    # Fallback (авто-промпт)
     if not image_prompt and event.message.photo:
         print("⚠️ Генерирую авто-промпт из текста...")
         base_prompt = news_text.replace('\n', ' ')[:150]
@@ -223,7 +214,6 @@ async def handler(event):
             if img_url:
                 sent_msg = await client.send_file(DESTINATION, img_url, caption=news_text, parse_mode='html')
             else:
-                # Если генерация не удалась, отправляем текст без фото
                 sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
         else:
             sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
@@ -256,5 +246,5 @@ if __name__ == '__main__':
     scheduler = AsyncIOScheduler(event_loop=client.loop)
     scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
     scheduler.start()
-    print("🤖 Бот запущен! (HTTPX Image Fix)")
+    print("🤖 Бот запущен! (Strict Fact-Checking)")
     client.run_until_disconnected()
