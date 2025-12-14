@@ -1,6 +1,6 @@
 import os
 import asyncio
-from telethon import TelegramClient, events, types # <--- Добавили types
+from telethon import TelegramClient, events, types 
 from openai import OpenAI
 
 # 1. Настройки
@@ -9,7 +9,7 @@ API_HASH = os.environ.get('TG_API_HASH')
 OPENAI_KEY = os.environ.get('OPENAI_API_KEY')
 
 SOURCE_CHANNELS = ['rian_ru', 'rentv_channel', 'breakingmash', 'bazabazon']
-DESTINATION = '@s_ostatok' # <--- ТВОЙ ЮЗЕРНЕЙМ
+DESTINATION = '@s_ostatok' 
 
 # 2. OpenAI
 if OPENAI_KEY.startswith("sk-or-"):
