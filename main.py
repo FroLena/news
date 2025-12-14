@@ -14,19 +14,17 @@ SOURCE_CHANNELS = [
     'rian_ru', 'rentv_channel', 'breakingmash', 'bazabazon', 
     'shot_shot', 'ostorozhno_novosti', 'rbc_news'
 ]
-DESTINATION = '@s_ostatok' # ТВОЙ ЮЗЕРНЕЙМ
+DESTINATION = '@s_ostatok'
 
 MAX_VIDEO_SIZE = 50 * 1024 * 1024 
 
-# 2. OpenAI (OpenRouter для текста и картинок)
+# 2. OpenAI
 print("Использую OpenRouter...")
 gpt_client = OpenAI(
     api_key=OPENAI_KEY, 
     base_url="https://openrouter.ai/api/v1"
 )
-# Модель для текста
 AI_MODEL = "openai/gpt-4o-mini"
-# Модель для картинок (Быстрая и качественная)
 IMAGE_MODEL = "black-forest-labs/flux-1-schnell"
 
 # 3. Клиент
@@ -34,12 +32,10 @@ client = TelegramClient('amvera_session', API_ID, API_HASH)
 raw_text_cache = []
 published_topics = []
 
-# --- ГЕНЕРАЦИЯ КАРТИНКИ (FLUX HYPERREALISM) ---
+# --- ГЕНЕРАЦИЯ КАРТИНКИ ---
 async def generate_image(prompt_text):
     print(f"🎨 Рисую иллюстрацию: {prompt_text[:50]}...")
     try:
-        # Flux любит квадратные или слегка горизонтальные кадры.
-        # 1024x1024 - оптимально для скорости и качества.
         response = gpt_client.images.generate(
             model=IMAGE_MODEL,
             prompt=prompt_text,
@@ -52,7 +48,7 @@ async def generate_image(prompt_text):
         print(f"⚠️ Ошибка генерации картинки: {e}")
         return None
 
-# --- ПОДКАСТ (EDGE TTS) ---
+# --- ПОДКАСТ ---
 async def send_evening_podcast():
     print("🎙 Готовлю подкаст...")
     try:
@@ -65,7 +61,7 @@ async def send_evening_podcast():
         full_text = "\n\n".join(history_posts[:20])
 
         system_prompt = (
-            "Ты — ведущий 'Сухой остаток'. Сделай вечерний дайджест (3-5 новостей).\n"
+            "Ты — ведущий 'Сухой остаток'. Сделай вечерний дайджест.\n"
             "Стиль: Спокойный, уверенный.\n"
             "Текст для чтения вслух."
         )
@@ -86,26 +82,24 @@ async def send_evening_podcast():
     except Exception as e:
         print(f"❌ Ошибка подкаста: {e}")
 
-# --- AI РЕДАКТОР + ПРОМПТ-ИНЖЕНЕР ---
+# --- AI РЕДАКТОР ---
 async def rewrite_news(text, history_topics):
     recent_history = history_topics[-5:] if len(history_topics) > 0 else []
     history_str = "\n".join([f"- {t}" for t in recent_history]) if recent_history else "Нет истории."
 
-    # === НОВЫЙ, УСИЛЕННЫЙ ПРОМПТ ===
     system_prompt = (
-        f"Ты — редактор и арт-директор. История: {history_str}\n\n"
-        f"ЗАДАЧА: Верни ответ строго в формате: ТЕКСТ ||| ПРОМПТ_ДЛЯ_КАРТИНКИ\n\n"
-        f"1. ТЕКСТ (HTML):\n"
-        f"   - Реклама -> SKIP. Дубли -> DUPLICATE.\n"
-        f"   - Сократи суть. В конце: <blockquote><b>📌 Суть:</b> [вывод]</blockquote>\n"
-        f"   - Острые темы: ||R:🔥|| в начало, ||POLL|| в конец.\n\n"
-        f"2. ПРОМПТ_ДЛЯ_КАРТИНКИ (English) --- СТРОГИЕ ПРАВИЛА:\n"
-        f"   - Твоя цель: создать промпт для ГИПЕРРЕАЛИСТИЧНОЙ, кинематографичной фотографии, передающей суть новости.\n"
-        f"   - Обязательно используй стиль: 'A documentary photograph, award-winning photojournalism, cinematic lighting, highly detailed, 8k resolution, realistic texture'.\n"
-        f"   - Детализация: Опиши главное действие, время суток, погоду, атмосферу (напряженная, спокойная, мрачная). Опиши ключевые объекты сцены и фон.\n"
-        f"   - ЗАПРЕТ: Никаких иллюстраций, мультиков, 3D-рендеров или абстракций. Только суровый реализм.\n"
-        f"   - Пример: 'A documentary photograph of firefighters battling a massive warehouse fire at night in Moscow. Huge orange flames, smoke billowing, wet asphalt reflecting lights, exhausted firefighters with hoses. Cinematic, gritty, highly detailed.'\n"
-        f"   - ПРОМПТ ДОЛЖЕН БЫТЬ НА АНГЛИЙСКОМ."
+        f"Ты — редактор. История: {history_str}\n\n"
+        f"ОЧЕНЬ ВАЖНО: Твой ответ должен состоять из ДВУХ частей, разделенных символами |||\n"
+        f"Часть 1: Текст новости (HTML)\n"
+        f"Часть 2: Промпт для картинки (English)\n\n"
+        f"ПРАВИЛА ТЕКСТА:\n"
+        f"- Реклама -> SKIP. Дубли -> DUPLICATE.\n"
+        f"- Сократи суть. В конце: <blockquote><b>📌 Суть:</b> [вывод]</blockquote>\n\n"
+        f"ПРАВИЛА КАРТИНКИ (ОБЯЗАТЕЛЬНО):\n"
+        f"- Всегда придумывай описание сцены на английском.\n"
+        f"- Стиль: 'Hyperrealistic documentary photo, cinematic lighting, 8k'.\n"
+        f"- Пример ответа:\n"
+        f"Пожарные потушили склад... ||| A photo of firefighters at night in Moscow, smoke, orange fire lights, wet asphalt."
     )
 
     try:
@@ -132,10 +126,16 @@ async def handler(event):
     raw_text_cache.append(short_hash)
     if len(raw_text_cache) > 100: raw_text_cache.pop(0)
 
-    print(f"🔎 Обработка: {event.chat.username}")
+    # Логируем название канала, если юзернейм скрыт
+    chat_title = event.chat.title if hasattr(event.chat, 'title') else str(event.chat_id)
+    print(f"🔎 Обработка: {chat_title}")
     
     full_response = await rewrite_news(text, published_topics)
     if not full_response: return
+
+    # ОТЛАДКА: Показываем, что вернул ИИ (первые 100 символов)
+    # Это поможет понять, есть ли там разделитель
+    print(f"🤖 Ответ AI (начало): {full_response[:100]}...")
 
     if "DUPLICATE" in full_response:
         print(f"❌ Дубль")
@@ -144,14 +144,28 @@ async def handler(event):
         print(f"🗑 Реклама")
         return
 
-    # Парсинг (ТЕКСТ ||| ПРОМПТ)
+    # --- ПАРСИНГ ---
     news_text = full_response
     image_prompt = None
+    
     if "|||" in full_response:
         parts = full_response.split("|||")
         news_text = parts[0].strip()
         image_prompt = parts[1].strip()
-    
+        print("✅ Промпт найден!")
+    else:
+        # ЗАПАСНОЙ ВАРИАНТ (Если ИИ забыл разделитель)
+        # Если в исходном посте было фото, а ИИ промпт не дал — принудительно генерируем
+        if event.message.photo:
+            print("⚠️ ИИ забыл промпт! Генерирую автоматически по тексту...")
+            # Берем первое предложение текста для промпта + стиль
+            base_prompt = news_text.split('.')[0] if '.' in news_text else news_text[:50]
+            image_prompt = f"Hyperrealistic documentary photo: {base_prompt}. Cinematic lighting, 8k, highly detailed."
+            
+        else:
+            print("⚠️ Разделитель ||| не найден. Будет только текст.")
+            news_text = full_response
+
     # Парсинг допов
     poll_data = None
     reaction = None
@@ -170,12 +184,12 @@ async def handler(event):
             if len(lines) >= 3: poll_data = {"q": lines[0], "o": [o for o in lines[1:] if o.strip()]}
         except: pass
 
-    # Отправка
+    # --- ОТПРАВКА ---
     sent_msg = None
     try:
         has_video = event.message.video is not None
         
-        # 1. ВИДЕО -> Оригинал
+        # 1. ВИДЕО (Оригинал)
         if has_video:
             if event.message.file.size > MAX_VIDEO_SIZE:
                 sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
@@ -185,15 +199,15 @@ async def handler(event):
                 sent_msg = await client.send_file(DESTINATION, path, caption=news_text, parse_mode='html', supports_streaming=True)
                 os.remove(path)
         
-        # 2. ФОТО/ТЕКСТ -> Генерация (Flux Hyperrealism)
+        # 2. ГЕНЕРАЦИЯ ФОТО
         elif image_prompt:
             img_url = await generate_image(image_prompt)
             if img_url:
-                # Отправляем как фото по ссылке
                 sent_msg = await client.send_file(DESTINATION, img_url, caption=news_text, parse_mode='html')
             else:
                 sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
         
+        # 3. ТОЛЬКО ТЕКСТ
         else:
             sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
 
@@ -212,7 +226,7 @@ async def handler(event):
         if len(published_topics) > 10: published_topics.pop(0)
 
     except Exception as e:
-        print(f"Ошибка: {e}")
+        print(f"Ошибка отправки: {e}")
 
 if __name__ == '__main__':
     print("🚀 Старт...")
@@ -220,5 +234,5 @@ if __name__ == '__main__':
     scheduler = AsyncIOScheduler(event_loop=client.loop)
     scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
     scheduler.start()
-    print("🤖 Бот запущен! (Flux: Hyperrealistic News Photos)")
+    print("🤖 Бот запущен! (Debug Mode + Auto-Prompt)")
     client.run_until_disconnected()
