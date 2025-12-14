@@ -1,107 +1,111 @@
 import os
 import asyncio
-from datetime import datetime
 from telethon import TelegramClient, events, types, functions
 from openai import OpenAI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import edge_tts 
+import edge_tts
 
 # 1. Настройки
 API_ID = int(os.environ.get('TG_API_ID'))
 API_HASH = os.environ.get('TG_API_HASH')
 OPENAI_KEY = os.environ.get('OPENAI_API_KEY')
 
-SOURCE_CHANNELS = ['rian_ru', 'rentv_channel', 'breakingmash', 'bazabazon']
-DESTINATION = '@s_ostatok'
+SOURCE_CHANNELS = [
+    'rian_ru', 'rentv_channel', 'breakingmash', 'bazabazon', 
+    'shot_shot', 'ostorozhno_novosti', 'rbc_news'
+]
+DESTINATION = '@s_ostatok' # ТВОЙ ЮЗЕРНЕЙМ
 
 MAX_VIDEO_SIZE = 50 * 1024 * 1024 
 
-# 2. OpenAI
-if OPENAI_KEY.startswith("sk-or-"):
-    print("Использую OpenRouter...")
-    gpt_client = OpenAI(api_key=OPENAI_KEY, base_url="https://openrouter.ai/api/v1")
-    AI_MODEL = "openai/gpt-4o-mini"
-else:
-    print("Использую OpenAI...")
-    gpt_client = OpenAI(api_key=OPENAI_KEY)
-    AI_MODEL = "gpt-4o-mini"
+# 2. OpenAI (OpenRouter для текста и картинок)
+print("Использую OpenRouter...")
+gpt_client = OpenAI(
+    api_key=OPENAI_KEY, 
+    base_url="https://openrouter.ai/api/v1"
+)
+# Модель для текста
+AI_MODEL = "openai/gpt-4o-mini"
+# Модель для картинок (Быстрая и качественная)
+IMAGE_MODEL = "black-forest-labs/flux-1-schnell"
 
-# 3. Клиент (Создаем, но пока не запускаем)
+# 3. Клиент
 client = TelegramClient('amvera_session', API_ID, API_HASH)
-
 raw_text_cache = []
 published_topics = []
 
-# --- ФУНКЦИЯ: ПОДКАСТ (EDGE TTS) ---
+# --- ГЕНЕРАЦИЯ КАРТИНКИ (FLUX HYPERREALISM) ---
+async def generate_image(prompt_text):
+    print(f"🎨 Рисую иллюстрацию: {prompt_text[:50]}...")
+    try:
+        # Flux любит квадратные или слегка горизонтальные кадры.
+        # 1024x1024 - оптимально для скорости и качества.
+        response = gpt_client.images.generate(
+            model=IMAGE_MODEL,
+            prompt=prompt_text,
+            n=1,
+            size="1024x1024"
+        )
+        image_url = response.data[0].url
+        return image_url
+    except Exception as e:
+        print(f"⚠️ Ошибка генерации картинки: {e}")
+        return None
+
+# --- ПОДКАСТ (EDGE TTS) ---
 async def send_evening_podcast():
-    print("🎙 Начинаю готовить вечерний подкаст...")
+    print("🎙 Готовлю подкаст...")
     try:
         history_posts = []
         async for message in client.iter_messages(DESTINATION, limit=30):
-            if message.text:
-                history_posts.append(message.text)
+            if message.text: history_posts.append(message.text)
         
-        if not history_posts:
-            print("🎙 В канале пусто.")
-            return
+        if not history_posts: return
 
         full_text = "\n\n".join(history_posts[:20])
 
         system_prompt = (
-            "Ты — ведущий радио «Сухой остаток». Сделай вечерний дайджест.\n"
-            "Выбери 3-5 главных новостей и свяжи их.\n"
+            "Ты — ведущий 'Сухой остаток'. Сделай вечерний дайджест (3-5 новостей).\n"
             "Стиль: Спокойный, уверенный.\n"
-            "Начни: 'Вечерний дайджест. Главное к этому часу...'\n"
-            "Закончи: 'Это был Сухой остаток. До связи.'\n"
-            "Текст для чтения вслух (без спецсимволов)."
+            "Текст для чтения вслух."
         )
         
-        script_response = gpt_client.chat.completions.create(
+        script = gpt_client.chat.completions.create(
             model=AI_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": full_text}
-            ]
-        )
-        script = script_response.choices[0].message.content
-        script = script.replace('*', '').replace('#', '')
-        print(f"🎙 Сценарий:\n{script}")
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": full_text}]
+        ).choices[0].message.content.replace('*', '').replace('#', '')
 
-        # Озвучка
-        speech_file_path = "podcast.mp3"
-        voice = "ru-RU-DmitryNeural"
-        
-        communicate = edge_tts.Communicate(script, voice)
-        await communicate.save(speech_file_path)
+        communicate = edge_tts.Communicate(script, "ru-RU-DmitryNeural")
+        await communicate.save("podcast.mp3")
             
         await client.send_file(
-            DESTINATION, 
-            speech_file_path, 
-            caption="🎙 <b>Итоги дня</b>\n<i>Главное за 2 минуты</i>", 
-            parse_mode='html',
-            voice_note=True
+            DESTINATION, "podcast.mp3", 
+            caption="🎙 <b>Итоги дня</b>", parse_mode='html', voice_note=True
         )
-        print("🎙 Подкаст отправлен!")
-        if os.path.exists(speech_file_path):
-            os.remove(speech_file_path)
-
+        if os.path.exists("podcast.mp3"): os.remove("podcast.mp3")
     except Exception as e:
         print(f"❌ Ошибка подкаста: {e}")
 
-# --- ОБРАБОТКА НОВОСТЕЙ ---
+# --- AI РЕДАКТОР + ПРОМПТ-ИНЖЕНЕР ---
 async def rewrite_news(text, history_topics):
     recent_history = history_topics[-5:] if len(history_topics) > 0 else []
     history_str = "\n".join([f"- {t}" for t in recent_history]) if recent_history else "Нет истории."
 
+    # === НОВЫЙ, УСИЛЕННЫЙ ПРОМПТ ===
     system_prompt = (
-        f"Ты — редактор канала. История тем:\n{history_str}\n\n"
-        f"ЗАДАЧИ:\n"
-        f"1. РЕАКЦИЯ (||R:emoji||): Оцени новость: 🔥, 🤡, ⚡️, 😢, 👍. "
-        f"Добавь в начало: ||R:🔥||.\n"
-        f"2. ФИЛЬТР: Рекламу -> SKIP. Дубли -> DUPLICATE.\n"
-        f"3. ИГНОР ПОДПИСЕЙ: Удали 'Подпишись на...'.\n"
-        f"4. ТЕКСТ (HTML): Сократи. В конце: <blockquote><b>📌 Суть:</b> [вывод]</blockquote>\n"
-        f"5. ОПРОС (||POLL||): Добавляй к острым темам."
+        f"Ты — редактор и арт-директор. История: {history_str}\n\n"
+        f"ЗАДАЧА: Верни ответ строго в формате: ТЕКСТ ||| ПРОМПТ_ДЛЯ_КАРТИНКИ\n\n"
+        f"1. ТЕКСТ (HTML):\n"
+        f"   - Реклама -> SKIP. Дубли -> DUPLICATE.\n"
+        f"   - Сократи суть. В конце: <blockquote><b>📌 Суть:</b> [вывод]</blockquote>\n"
+        f"   - Острые темы: ||R:🔥|| в начало, ||POLL|| в конец.\n\n"
+        f"2. ПРОМПТ_ДЛЯ_КАРТИНКИ (English) --- СТРОГИЕ ПРАВИЛА:\n"
+        f"   - Твоя цель: создать промпт для ГИПЕРРЕАЛИСТИЧНОЙ, кинематографичной фотографии, передающей суть новости.\n"
+        f"   - Обязательно используй стиль: 'A documentary photograph, award-winning photojournalism, cinematic lighting, highly detailed, 8k resolution, realistic texture'.\n"
+        f"   - Детализация: Опиши главное действие, время суток, погоду, атмосферу (напряженная, спокойная, мрачная). Опиши ключевые объекты сцены и фон.\n"
+        f"   - ЗАПРЕТ: Никаких иллюстраций, мультиков, 3D-рендеров или абстракций. Только суровый реализм.\n"
+        f"   - Пример: 'A documentary photograph of firefighters battling a massive warehouse fire at night in Moscow. Huge orange flames, smoke billowing, wet asphalt reflecting lights, exhausted firefighters with hoses. Cinematic, gritty, highly detailed.'\n"
+        f"   - ПРОМПТ ДОЛЖЕН БЫТЬ НА АНГЛИЙСКОМ."
     )
 
     try:
@@ -134,101 +138,87 @@ async def handler(event):
     if not full_response: return
 
     if "DUPLICATE" in full_response:
-        print(f"❌ Дубль: {full_response[:50]}")
+        print(f"❌ Дубль")
         return
     if "SKIP" in full_response:
-        print(f"🗑 Реклама: {full_response[:50]}")
+        print(f"🗑 Реклама")
         return
 
+    # Парсинг (ТЕКСТ ||| ПРОМПТ)
     news_text = full_response
+    image_prompt = None
+    if "|||" in full_response:
+        parts = full_response.split("|||")
+        news_text = parts[0].strip()
+        image_prompt = parts[1].strip()
+    
+    # Парсинг допов
     poll_data = None
     reaction = None
-
-    if "||R:" in full_response:
+    if "||R:" in news_text:
         try:
-            parts = full_response.split("||R:")
-            subparts = parts[1].split("||")
-            reaction = subparts[0].strip()
-            full_response = subparts[1].strip()
+            p = news_text.split("||R:")
+            sub = p[1].split("||")
+            reaction = sub[0].strip()
+            news_text = sub[1].strip()
         except: pass
-            
-    if "||POLL||" in full_response:
+    if "||POLL||" in news_text:
         try:
-            parts = full_response.split("||POLL||")
-            news_text = parts[0].strip()
-            poll_lines = parts[1].strip().split('\n')
-            if len(poll_lines) >= 3:
-                poll_data = {"q": poll_lines[0], "o": [opt for opt in poll_lines[1:] if opt.strip()]}
+            p = news_text.split("||POLL||")
+            news_text = p[0].strip()
+            lines = p[1].strip().split('\n')
+            if len(lines) >= 3: poll_data = {"q": lines[0], "o": [o for o in lines[1:] if o.strip()]}
         except: pass
-    else:
-        news_text = full_response
 
-    path = None
-    sent_msg = None 
+    # Отправка
+    sent_msg = None
     try:
         has_video = event.message.video is not None
-        has_photo = event.message.photo is not None
-
+        
+        # 1. ВИДЕО -> Оригинал
         if has_video:
             if event.message.file.size > MAX_VIDEO_SIZE:
                 sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
             else:
-                print("🎥 Качаю видео...")
+                print("🎥 Видео... (Оригинал)")
                 path = await event.download_media()
                 sent_msg = await client.send_file(DESTINATION, path, caption=news_text, parse_mode='html', supports_streaming=True)
-        elif has_photo:
-            print("📸 Качаю фото...")
-            path = await event.download_media()
-            sent_msg = await client.send_file(DESTINATION, path, caption=news_text, parse_mode='html')
+                os.remove(path)
+        
+        # 2. ФОТО/ТЕКСТ -> Генерация (Flux Hyperrealism)
+        elif image_prompt:
+            img_url = await generate_image(image_prompt)
+            if img_url:
+                # Отправляем как фото по ссылке
+                sent_msg = await client.send_file(DESTINATION, img_url, caption=news_text, parse_mode='html')
+            else:
+                sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
+        
         else:
             sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
-        
-        if sent_msg and reaction:
-            await asyncio.sleep(2) 
-            try:
-                await client(functions.messages.SendReactionRequest(
-                    peer=DESTINATION,
-                    msg_id=sent_msg.id,
-                    reaction=[types.ReactionEmoji(emoticon=reaction)]
-                ))
-                print(f"😎 Реакция: {reaction}")
-            except: pass
 
+        # Допы
+        if sent_msg and reaction:
+            await asyncio.sleep(2)
+            try: await client(functions.messages.SendReactionRequest(peer=DESTINATION, msg_id=sent_msg.id, reaction=[types.ReactionEmoji(emoticon=reaction)]))
+            except: pass
         if poll_data:
             await asyncio.sleep(1)
-            poll_media = types.InputMediaPoll(
-                poll=types.Poll(
-                    id=12345, 
-                    question=poll_data["q"],
-                    answers=[types.PollAnswer(text=opt, option=bytes([i])) for i, opt in enumerate(poll_data["o"])]
-                )
-            )
+            poll_media = types.InputMediaPoll(poll=types.Poll(id=1, question=poll_data["q"], answers=[types.PollAnswer(text=o, option=bytes([i])) for i, o in enumerate(poll_data["o"])]))
             await client.send_message(DESTINATION, file=poll_media)
 
         print("✅ Пост готов!")
-        
-        clean_summary = news_text.replace('<blockquote>', '').replace('</blockquote>', '').replace('<b>', '').replace('</b>', '')[:100]
-        published_topics.append(clean_summary)
+        published_topics.append(news_text[:100])
         if len(published_topics) > 10: published_topics.pop(0)
 
     except Exception as e:
-        print(f"Ошибка отправки: {e}")
-    finally:
-        if path and os.path.exists(path):
-            os.remove(path)
+        print(f"Ошибка: {e}")
 
-# --- ИСПРАВЛЕННЫЙ ЗАПУСК ---
 if __name__ == '__main__':
-    print("🚀 Инициализация клиента...")
-    client.start() # Сначала стартуем клиент (это создаст Loop)
-    
-    # Теперь, когда Loop существует, передаем его планировщику
+    print("🚀 Старт...")
+    client.start()
     scheduler = AsyncIOScheduler(event_loop=client.loop)
-    
-    # Ставим задачу (21:00 MSK = 18:00 UTC)
     scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
     scheduler.start()
-    print("⏰ Планировщик запущен")
-
-    print("🤖 Бот слушает новости... (v: Reactions + Podcast Fixed)")
+    print("🤖 Бот запущен! (Flux: Hyperrealistic News Photos)")
     client.run_until_disconnected()
