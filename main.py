@@ -34,7 +34,7 @@ client = TelegramClient('amvera_session', API_ID, API_HASH)
 raw_text_cache = []
 published_topics = []
 
-# --- ГЕНЕРАЦИЯ КАРТИНКИ (POLLINATIONS) ---
+# --- ГЕНЕРАЦИЯ КАРТИНКИ (Pollinations + FIX TIMEOUT) ---
 async def generate_image(prompt_text):
     clean_prompt = prompt_text.replace('||', '').replace('R:', '').strip()
     print(f"🎨 Рисую (Flux): {clean_prompt[:50]}...")
@@ -42,12 +42,19 @@ async def generate_image(prompt_text):
     encoded_prompt = urllib.parse.quote(clean_prompt)
     import random
     seed = random.randint(1, 1000000)
-    # Используем Flux, nologo=true, enhance=false (чтобы слушался промпта)
+    
+    # URL для генерации
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&model=flux&seed={seed}&nologo=true"
     
-    async with httpx.AsyncClient(timeout=30.0) as http_client:
+    # Маскируемся под браузер Chrome
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    # Увеличили тайм-аут до 60 секунд!
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as http_client:
         try:
-            response = await http_client.get(url)
+            response = await http_client.get(url, headers=headers)
             if response.status_code == 200:
                 filename = f"image_{seed}.jpg"
                 with open(filename, "wb") as f:
@@ -57,7 +64,7 @@ async def generate_image(prompt_text):
                 print(f"⚠️ Ошибка генерации ({response.status_code})")
                 return None
         except Exception as e:
-            print(f"⚠️ Ошибка сети: {e}")
+            print(f"⚠️ Ошибка сети при скачивании: {e}")
             return None
 
 # --- ПОДКАСТ ---
@@ -96,7 +103,7 @@ async def send_evening_podcast():
     except Exception as e:
         print(f"❌ Ошибка подкаста: {e}")
 
-# --- AI РЕДАКТОР (С ИСПРАВЛЕННЫМИ ОПРОСАМИ) ---
+# --- AI РЕДАКТОР ---
 async def rewrite_news(text, history_topics):
     recent_history = history_topics[-5:] if len(history_topics) > 0 else []
     history_str = "\n".join([f"- {t}" for t in recent_history]) if recent_history else "Нет истории."
@@ -117,8 +124,7 @@ async def rewrite_news(text, history_topics):
         f"   Текст вопроса?\n"
         f"   Вариант 1\n"
         f"   Вариант 2\n"
-        f"   Вариант 3\n"
-        f"   (ИИ должен сам придумать вопрос и варианты по теме новости).\n\n"
+        f"   Вариант 3\n\n"
         f"=== ЧАСТЬ 2: ПРОМПТ КАРТИНКИ (English) ===\n"
         f"- Style: 'Hyperrealistic documentary photo, award-winning journalism, cinematic lighting, 8k'.\n"
         f"- NO TEXT on image.\n"
@@ -270,5 +276,5 @@ if __name__ == '__main__':
     scheduler = AsyncIOScheduler(event_loop=client.loop)
     scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
     scheduler.start()
-    print("🤖 Бот запущен! (Polls Fixed + Pollinations)")
+    print("🤖 Бот запущен! (Timeout 60s)")
     client.run_until_disconnected()
