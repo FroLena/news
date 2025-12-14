@@ -4,7 +4,7 @@ from datetime import datetime
 from telethon import TelegramClient, events, types, functions
 from openai import OpenAI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import edge_tts # <--- Бесплатная озвучка от Microsoft
+import edge_tts 
 
 # 1. Настройки
 API_ID = int(os.environ.get('TG_API_ID'))
@@ -12,11 +12,11 @@ API_HASH = os.environ.get('TG_API_HASH')
 OPENAI_KEY = os.environ.get('OPENAI_API_KEY')
 
 SOURCE_CHANNELS = ['rian_ru', 'rentv_channel', 'breakingmash', 'bazabazon']
-DESTINATION = '@s_ostatok' # ТВОЙ ЮЗЕРНЕЙМ
+DESTINATION = '@s_ostatok'
 
 MAX_VIDEO_SIZE = 50 * 1024 * 1024 
 
-# 2. OpenAI (Работает и OpenRouter, и оригинал)
+# 2. OpenAI
 if OPENAI_KEY.startswith("sk-or-"):
     print("Использую OpenRouter...")
     gpt_client = OpenAI(api_key=OPENAI_KEY, base_url="https://openrouter.ai/api/v1")
@@ -26,37 +26,34 @@ else:
     gpt_client = OpenAI(api_key=OPENAI_KEY)
     AI_MODEL = "gpt-4o-mini"
 
-# 3. Клиент
+# 3. Клиент (Создаем, но пока не запускаем)
 client = TelegramClient('amvera_session', API_ID, API_HASH)
-scheduler = AsyncIOScheduler()
 
 raw_text_cache = []
 published_topics = []
 
-# --- ФУНКЦИЯ: ГЕНЕРАЦИЯ ПОДКАСТА (EDGE TTS) ---
+# --- ФУНКЦИЯ: ПОДКАСТ (EDGE TTS) ---
 async def send_evening_podcast():
     print("🎙 Начинаю готовить вечерний подкаст...")
     try:
-        # 1. Читаем посты за сегодня (последние 30)
         history_posts = []
         async for message in client.iter_messages(DESTINATION, limit=30):
             if message.text:
                 history_posts.append(message.text)
         
         if not history_posts:
-            print("🎙 В канале пусто, подкаст отменен.")
+            print("🎙 В канале пусто.")
             return
 
         full_text = "\n\n".join(history_posts[:20])
 
-        # 2. Пишем сценарий
         system_prompt = (
-            "Ты — ведущий радио «Сухой остаток». Твоя задача — сделать вечерний дайджест.\n"
-            "Выбери 3-5 главных новостей из списка и свяжи их в рассказ.\n"
-            "Стиль: Спокойный, уверенный, без лишних приветствий.\n"
+            "Ты — ведущий радио «Сухой остаток». Сделай вечерний дайджест.\n"
+            "Выбери 3-5 главных новостей и свяжи их.\n"
+            "Стиль: Спокойный, уверенный.\n"
             "Начни: 'Вечерний дайджест. Главное к этому часу...'\n"
             "Закончи: 'Это был Сухой остаток. До связи.'\n"
-            "Текст должен быть готовым для чтения вслух (без спецсимволов и звездочек)."
+            "Текст для чтения вслух (без спецсимволов)."
         )
         
         script_response = gpt_client.chat.completions.create(
@@ -67,28 +64,24 @@ async def send_evening_podcast():
             ]
         )
         script = script_response.choices[0].message.content
-        
-        # Очистка скрипта от мусора (звездочек Markdown), чтобы диктор не читал "звездочка"
         script = script.replace('*', '').replace('#', '')
-        print(f"🎙 Сценарий готов:\n{script}")
+        print(f"🎙 Сценарий:\n{script}")
 
-        # 3. Озвучка через Microsoft Edge (Бесплатно)
+        # Озвучка
         speech_file_path = "podcast.mp3"
-        voice = "ru-RU-DmitryNeural" # Мужской голос. Можно "ru-RU-SvetlanaNeural" (женский)
+        voice = "ru-RU-DmitryNeural"
         
         communicate = edge_tts.Communicate(script, voice)
         await communicate.save(speech_file_path)
             
-        # 4. Отправка
         await client.send_file(
             DESTINATION, 
             speech_file_path, 
             caption="🎙 <b>Итоги дня</b>\n<i>Главное за 2 минуты</i>", 
             parse_mode='html',
-            voice_note=True # Голосовое сообщение
+            voice_note=True
         )
         print("🎙 Подкаст отправлен!")
-        
         if os.path.exists(speech_file_path):
             os.remove(speech_file_path)
 
@@ -147,7 +140,6 @@ async def handler(event):
         print(f"🗑 Реклама: {full_response[:50]}")
         return
 
-    # Парсинг
     news_text = full_response
     poll_data = None
     reaction = None
@@ -171,7 +163,6 @@ async def handler(event):
     else:
         news_text = full_response
 
-    # Отправка
     path = None
     sent_msg = None 
     try:
@@ -192,7 +183,6 @@ async def handler(event):
         else:
             sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
         
-        # Реакция
         if sent_msg and reaction:
             await asyncio.sleep(2) 
             try:
@@ -204,7 +194,6 @@ async def handler(event):
                 print(f"😎 Реакция: {reaction}")
             except: pass
 
-        # Опрос
         if poll_data:
             await asyncio.sleep(1)
             poll_media = types.InputMediaPoll(
@@ -228,10 +217,18 @@ async def handler(event):
         if path and os.path.exists(path):
             os.remove(path)
 
-# Запуск таймера (21:00 по Москве = 18:00 UTC)
-scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
-scheduler.start()
+# --- ИСПРАВЛЕННЫЙ ЗАПУСК ---
+if __name__ == '__main__':
+    print("🚀 Инициализация клиента...")
+    client.start() # Сначала стартуем клиент (это создаст Loop)
+    
+    # Теперь, когда Loop существует, передаем его планировщику
+    scheduler = AsyncIOScheduler(event_loop=client.loop)
+    
+    # Ставим задачу (21:00 MSK = 18:00 UTC)
+    scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
+    scheduler.start()
+    print("⏰ Планировщик запущен")
 
-print("Бот запущен! (v: Reactions + FREE Podcast)")
-client.start()
-client.run_until_disconnected()
+    print("🤖 Бот слушает новости... (v: Reactions + Podcast Fixed)")
+    client.run_until_disconnected()
