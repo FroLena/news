@@ -2,6 +2,7 @@ import os
 import asyncio
 import json
 import httpx
+import urllib.parse
 from telethon import TelegramClient, events, types, functions
 from openai import OpenAI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -20,49 +21,49 @@ DESTINATION = '@s_ostatok'
 
 MAX_VIDEO_SIZE = 50 * 1024 * 1024 
 
-# 2. OpenAI
+# 2. OpenAI (Только для текста)
 print("Использую OpenRouter...")
 gpt_client = OpenAI(
     api_key=OPENAI_KEY, 
     base_url="https://openrouter.ai/api/v1"
 )
 AI_MODEL = "openai/gpt-4o-mini"
-IMAGE_MODEL = "black-forest-labs/flux-1-schnell"
 
 # 3. Клиент
 client = TelegramClient('amvera_session', API_ID, API_HASH)
 raw_text_cache = []
 published_topics = []
 
-# --- ГЕНЕРАЦИЯ КАРТИНКИ ---
+# --- ГЕНЕРАЦИЯ КАРТИНКИ (POLLINATIONS FLUX) ---
 async def generate_image(prompt_text):
     clean_prompt = prompt_text.replace('||', '').replace('R:', '').strip()
-    print(f"🎨 Рисую (Flux): {clean_prompt[:50]}...")
+    print(f"🎨 Рисую (Flux via Pollinations): {clean_prompt[:50]}...")
     
-    url = "https://openrouter.ai/api/v1/images/generations"
-    headers = {
-        "Authorization": f"Bearer {OPENAI_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://amvera.ru",
-        "X-Title": "NewsBot"
-    }
-    data = {
-        "model": IMAGE_MODEL,
-        "prompt": clean_prompt,
-        "n": 1,
-        "size": "1024x1024"
-    }
+    # Кодируем промпт для URL
+    encoded_prompt = urllib.parse.quote(clean_prompt)
+    
+    # Формируем URL (1280x720 - кинематографичный формат)
+    # Используем модель Flux, seed для случайности, nologo=true
+    import random
+    seed = random.randint(1, 1000000)
+    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&model=flux&seed={seed}&nologo=true"
     
     async with httpx.AsyncClient(timeout=30.0) as http_client:
         try:
-            response = await http_client.post(url, headers=headers, json=data)
+            # Скачиваем картинку, чтобы отправить как файл
+            response = await http_client.get(url)
+            
             if response.status_code == 200:
-                return response.json()['data'][0]['url']
+                # Сохраняем во временный файл
+                filename = f"image_{seed}.jpg"
+                with open(filename, "wb") as f:
+                    f.write(response.content)
+                return filename # Возвращаем путь к файлу
             else:
-                print(f"⚠️ Ошибка API OpenRouter ({response.status_code}): {response.text[:200]}")
+                print(f"⚠️ Ошибка генерации ({response.status_code})")
                 return None
         except Exception as e:
-            print(f"⚠️ Ошибка сети: {e}")
+            print(f"⚠️ Ошибка сети при скачивании картинки: {e}")
             return None
 
 # --- ПОДКАСТ ---
@@ -101,7 +102,7 @@ async def send_evening_podcast():
     except Exception as e:
         print(f"❌ Ошибка подкаста: {e}")
 
-# --- AI РЕДАКТОР (ИСПРАВЛЕННЫЙ: ТОЛЬКО ФАКТЫ) ---
+# --- AI РЕДАКТОР ---
 async def rewrite_news(text, history_topics):
     recent_history = history_topics[-5:] if len(history_topics) > 0 else []
     history_str = "\n".join([f"- {t}" for t in recent_history]) if recent_history else "Нет истории."
@@ -197,6 +198,7 @@ async def handler(event):
         image_prompt = f"Hyperrealistic documentary photo, award-winning journalism, cinematic lighting, 8k. Context: {base_prompt}"
 
     # --- ОТПРАВКА ---
+    path_to_image = None
     sent_msg = None
     try:
         has_video = event.message.video is not None
@@ -210,9 +212,10 @@ async def handler(event):
                 os.remove(path)
         
         elif image_prompt:
-            img_url = await generate_image(image_prompt)
-            if img_url:
-                sent_msg = await client.send_file(DESTINATION, img_url, caption=news_text, parse_mode='html')
+            # Используем новую функцию через Pollinations
+            path_to_image = await generate_image(image_prompt)
+            if path_to_image and os.path.exists(path_to_image):
+                sent_msg = await client.send_file(DESTINATION, path_to_image, caption=news_text, parse_mode='html')
             else:
                 sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
         else:
@@ -239,6 +242,10 @@ async def handler(event):
 
     except Exception as e:
         print(f"Ошибка отправки: {e}")
+    finally:
+        # Удаляем временный файл картинки
+        if path_to_image and os.path.exists(path_to_image):
+            os.remove(path_to_image)
 
 if __name__ == '__main__':
     print("🚀 Старт...")
@@ -246,5 +253,5 @@ if __name__ == '__main__':
     scheduler = AsyncIOScheduler(event_loop=client.loop)
     scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
     scheduler.start()
-    print("🤖 Бот запущен! (Strict Fact-Checking)")
+    print("🤖 Бот запущен! (Pollinations FIX)")
     client.run_until_disconnected()
