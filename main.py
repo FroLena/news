@@ -1,6 +1,6 @@
 import os
 import asyncio
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, types # <--- Добавили types
 from openai import OpenAI
 
 # 1. Настройки
@@ -28,31 +28,24 @@ raw_text_cache = []
 published_topics = []
 
 async def rewrite_news(text, history_topics):
-    # Если истории почти нет, не напрягаем ИИ проверкой, просто пишем
     if len(history_topics) < 1:
         print("🆕 История пуста, пропускаем проверку на дубли.")
-        check_duplicates = False
         history_str = "Нет истории."
     else:
-        check_duplicates = True
         recent_history = history_topics[-5:] 
         history_str = "\n".join([f"- {t}" for t in recent_history])
         print(f"🧐 Сравниваю с:\n{history_str}")
 
-    # ИНСТРУКЦИЯ СТАЛА МЯГЧЕ
     system_prompt = (
         f"Ты — редактор новостей. \n"
         f"История опубликованного:\n{history_str}\n\n"
         f"ИНСТРУКЦИЯ:\n"
-        f"1. СРАВНЕНИЕ (Только если история не пуста): \n"
-        f"   - Блокируй (верни DUPLICATE) ТОЛЬКО если это АБСОЛЮТНО то же самое событие (те же цифры, те же имена).\n"
-        f"   - Если это развитие темы, новые подробности или просто похожая тема — ЭТО НЕ ДУБЛЬ! Пиши новость.\n"
-        f"   - Если сомневаешься — ПИШИ НОВОСТЬ.\n"
-        f"2. РЕКЛАМА: Если пост продает курсы, товары или просит подписаться — верни SKIP.\n"
+        f"1. СРАВНЕНИЕ: Блокируй (верни DUPLICATE) ТОЛЬКО если это 100% повтор (те же цифры/имена). Если развитие темы — пиши.\n"
+        f"2. РЕКЛАМА: Если продажа/подписка — верни SKIP.\n"
         f"3. ОФОРМЛЕНИЕ (HTML):\n"
         f"   Текст новости.\n"
         f"   <blockquote><b>📌 Суть:</b> [вывод]</blockquote>\n"
-        f"4. ОПРОС: Если тема вызывает эмоции, добавь в конце:\n"
+        f"4. ОПРОС: Если тема острая, добавь в конце:\n"
         f"   ||POLL||\n"
         f"   Вопрос?\n"
         f"   Вариант 1\n"
@@ -78,7 +71,7 @@ async def handler(event):
     if not text: text = "" 
     if len(text) < 15 and not event.message.photo: return
 
-    # Быстрый фильтр (точное совпадение текста)
+    # Быстрый фильтр
     if text:
         short_hash = text[:100]
         if short_hash in raw_text_cache: return
@@ -94,10 +87,8 @@ async def handler(event):
     
     if not full_response: return
 
-    # Логика блокировки
     if "DUPLICATE" in full_response:
-        # Мы теперь видим в логах, что именно он ответил (иногда он пишет DUPLICATE: причина)
-        print(f"❌ ИИ решил, что это дубль. Ответ ИИ: {full_response[:50]}...")
+        print(f"❌ Дубль. Причина AI: {full_response[:50]}...")
         return
     if "SKIP" in full_response:
         print("🗑 Реклама.")
@@ -115,24 +106,38 @@ async def handler(event):
             if len(poll_lines) >= 3:
                 poll_data = {"q": poll_lines[0], "o": [opt for opt in poll_lines[1:] if opt.strip()]}
         except:
-            pass # Если опрос кривой, постим только текст
+            pass
 
     # --- ОТПРАВКА ---
     path = None
     try:
+        # 1. Отправляем новость
         if event.message.photo:
             path = await event.download_media()
             await client.send_file(DESTINATION, path, caption=news_text, parse_mode='html')
         else:
             await client.send_message(DESTINATION, news_text, parse_mode='html')
         
+        # 2. ОТПРАВКА ОПРОСА (ИСПРАВЛЕНО)
         if poll_data:
             await asyncio.sleep(1)
-            await client.send_poll(DESTINATION, question=poll_data["q"], options=poll_data["o"])
+            # Собираем ответы в правильный формат для Telethon
+            answers = [types.PollAnswer(text=opt, option=bytes([i])) for i, opt in enumerate(poll_data["o"])]
+            
+            # Создаем объект опроса
+            poll_media = types.InputMediaPoll(
+                poll=types.Poll(
+                    id=12345, # ID не важен при создании
+                    question=poll_data["q"],
+                    answers=answers
+                )
+            )
+            # Отправляем как медиа-вложение
+            await client.send_message(DESTINATION, file=poll_media)
+            print("📊 Опрос опубликован")
 
-        print("✅ Пост опубликован!")
+        print("✅ Пост готов!")
         
-        # Сохраняем в историю очищенный от HTML текст (чтобы ИИ было проще сравнивать)
         clean_summary = news_text.replace('<blockquote>', '').replace('</blockquote>', '').replace('<b>', '').replace('</b>', '')[:100]
         published_topics.append(clean_summary)
         if len(published_topics) > 10: published_topics.pop(0)
@@ -143,6 +148,6 @@ async def handler(event):
         if path and os.path.exists(path):
             os.remove(path)
 
-print("Бот запущен! (Режим: МЯГКИЙ ФИЛЬТР)")
+print("Бот запущен! (Режим: Fix Polls)")
 client.start()
 client.run_until_disconnected()
