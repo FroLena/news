@@ -5,3 +5,4 @@ python-dotenv
 nest_asyncio
 requests
 apscheduler
+edge-tts
