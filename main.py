@@ -3,45 +3,40 @@ import asyncio
 from telethon import TelegramClient, events
 from openai import OpenAI
 
-# 1. Получаем настройки
+# 1. Настройки
 API_ID = int(os.environ.get('TG_API_ID'))
 API_HASH = os.environ.get('TG_API_HASH')
 OPENAI_KEY = os.environ.get('OPENAI_API_KEY')
 
-# Настройки каналов (без @)
+# Каналы
 SOURCE_CHANNELS = ['rian_ru', 'rentv_channel', 'breakingmash', 'bazabazon']
+DESTINATION = '@s_ostatok' # <--- ПРОВЕРЬ ЮЗЕРНЕЙМ
 
-# Куда отправляем (Твой канал)
-DESTINATION = '@s_ostatok' # <--- ПРОВЕРЬ, ЧТО ТУТ ТВОЙ ЮЗЕРНЕЙМ
-
-# 2. Настраиваем подключение к нейросети
+# 2. OpenAI / OpenRouter
 if OPENAI_KEY.startswith("sk-or-"):
-    print("Использую настройки OpenRouter...")
-    gpt_client = OpenAI(
-        api_key=OPENAI_KEY,
-        base_url="https://openrouter.ai/api/v1"
-    )
+    print("Использую OpenRouter...")
+    gpt_client = OpenAI(api_key=OPENAI_KEY, base_url="https://openrouter.ai/api/v1")
     AI_MODEL = "openai/gpt-4o-mini"
 else:
-    print("Использую официальный OpenAI...")
+    print("Использую OpenAI...")
     gpt_client = OpenAI(api_key=OPENAI_KEY)
     AI_MODEL = "gpt-4o-mini"
 
-# 3. Запускаем Телеграм
+# 3. Клиент Телеграм
 client = TelegramClient('amvera_session', API_ID, API_HASH)
 
 processed_news = []
 
 async def rewrite_news(text):
-    # Обновленная инструкция: просим оформить Суть как цитату (>)
+    # ПРОМПТ: Просим вернуть HTML. Тег <blockquote> создаст цитату.
     system_prompt = (
-        "Ты — редактор канала «Сухой остаток». Твоя задача — сократить новость, оставив только факты. "
-        "Стиль: информационный, без воды. "
-        "Структура ответа:\n"
-        "1. Основной текст новости (коротко).\n"
-        "2. С новой строки, обязательно со знаком цитирования '>':\n"
-        "> 📌 Суть: [одно предложение с главным выводом].\n"
-        "Если новость — реклама, верни только слово SKIP."
+        "Ты — редактор канала. Сократи новость, оставь факты. "
+        "Формат ответа строго HTML:\n"
+        "1. Основной текст новости.\n"
+        "2. В конце вставь вывод в теге цитаты:\n"
+        "<blockquote><b>📌 Суть:</b> [твой вывод]</blockquote>\n"
+        "Не используй Markdown (звездочки и решетки), только теги HTML."
+        "Если реклама — верни SKIP."
     )
     try:
         response = gpt_client.chat.completions.create(
@@ -70,11 +65,10 @@ async def handler(event):
     new_post = await rewrite_news(text)
     
     if new_post and "SKIP" not in new_post:
-        # Отправляем ТОЛЬКО текст новости (без приписки Источник)
-        # parse_mode='md' включен по умолчанию в Telethon для текста
-        await client.send_message(DESTINATION, new_post)
+        # ВАЖНО: parse_mode='html' включает поддержку тегов
+        await client.send_message(DESTINATION, new_post, parse_mode='html')
         print("✅ Пост отправлен!")
 
-print("Бот запущен! Жду новостей...")
+print("Бот запущен! (Режим HTML)")
 client.start()
 client.run_until_disconnected()
