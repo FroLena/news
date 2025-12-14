@@ -1,6 +1,6 @@
 import os
 import asyncio
-from telethon import TelegramClient, events, types # <--- Важно: добавили types для опросов
+from telethon import TelegramClient, events, types
 from openai import OpenAI
 
 # 1. Настройки
@@ -9,7 +9,10 @@ API_HASH = os.environ.get('TG_API_HASH')
 OPENAI_KEY = os.environ.get('OPENAI_API_KEY')
 
 SOURCE_CHANNELS = ['rian_ru', 'rentv_channel', 'breakingmash', 'bazabazon']
-DESTINATION = '@s_ostatok' # <--- ТВОЙ ЮЗЕРНЕЙМ
+DESTINATION = '@s_ostatok' # ТВОЙ ЮЗЕРНЕЙМ
+
+# Максимальный размер видео для скачивания (в байтах). 50 МБ = 50 * 1024 * 1024
+MAX_VIDEO_SIZE = 50 * 1024 * 1024 
 
 # 2. OpenAI
 if OPENAI_KEY.startswith("sk-or-"):
@@ -42,7 +45,7 @@ async def rewrite_news(text, history_topics):
         f"ИНСТРУКЦИЯ:\n"
         f"1. ДУБЛИ: Блокируй (верни DUPLICATE) ТОЛЬКО если это 100% повтор. Развитие темы — публикуй.\n"
         f"2. РЕКЛАМА: Если продажа/подписка — верни SKIP.\n"
-        f"3. ТЕКСТ (HTML): Сократи, оставь факты.\n"
+        f"3. ТЕКСТ (HTML): Сократи новость, оставь суть.\n"
         f"   В конце обязательно: <blockquote><b>📌 Суть:</b> [вывод]</blockquote>\n"
         f"4. ОПРОС: Если тема острая, добавь в конце:\n"
         f"   ||POLL||\n"
@@ -69,12 +72,15 @@ async def handler(event):
     text = event.message.message
     if not text: text = "" 
     
-    # ФИЛЬТР: Если текста мало (< 20 символов), мы это пропускаем.
-    # Даже если есть фото. Картинки без текста нам не нужны.
-    if len(text) < 20: 
-        return
+    # Определяем тип медиа
+    has_photo = event.message.photo is not None
+    has_video = event.message.video is not None
+    
+    # Если текста мало (< 20 символов) и нет медиа, пропускаем.
+    # Если есть видео/фото, но текста нет вообще — тоже пропускаем (нужен контекст).
+    if len(text) < 20: return
 
-    # Быстрый фильтр кэша
+    # Быстрый фильтр (кэш)
     short_hash = text[:100]
     if short_hash in raw_text_cache: return
     raw_text_cache.append(short_hash)
@@ -86,7 +92,6 @@ async def handler(event):
     full_response = await rewrite_news(text, published_topics)
     
     if not full_response: return
-
     if "DUPLICATE" in full_response:
         print(f"❌ Дубль. Причина AI: {full_response[:50]}...")
         return
@@ -97,7 +102,6 @@ async def handler(event):
     # --- ПАРСИНГ ---
     news_text = full_response
     poll_data = None
-    
     if "||POLL||" in full_response:
         try:
             parts = full_response.split("||POLL||")
@@ -108,21 +112,34 @@ async def handler(event):
         except:
             pass
 
-    # --- ОТПРАВКА ---
+    # --- СКАЧИВАНИЕ И ОТПРАВКА ---
     path = None
     try:
-        # 1. Отправляем новость (Фото + Текст в одном сообщении)
-        if event.message.photo:
+        # Сценарий 1: ВИДЕО
+        if has_video:
+            # Проверяем размер
+            video_size = event.message.file.size
+            if video_size > MAX_VIDEO_SIZE:
+                print(f"⚠️ Видео слишком большое ({video_size/1024/1024:.1f} MB). Публикую только текст.")
+                await client.send_message(DESTINATION, news_text, parse_mode='html')
+            else:
+                print("🎥 Качаю видео...")
+                path = await event.download_media()
+                await client.send_file(DESTINATION, path, caption=news_text, parse_mode='html', supports_streaming=True)
+        
+        # Сценарий 2: ФОТО
+        elif has_photo:
             print("📸 Качаю фото...")
             path = await event.download_media()
             await client.send_file(DESTINATION, path, caption=news_text, parse_mode='html')
+        
+        # Сценарий 3: ТОЛЬКО ТЕКСТ
         else:
             await client.send_message(DESTINATION, news_text, parse_mode='html')
         
-        # 2. Отправляем опрос (если есть)
+        # Отправка опроса (если есть)
         if poll_data:
             await asyncio.sleep(1)
-            # Правильный метод создания опроса для Telethon
             poll_media = types.InputMediaPoll(
                 poll=types.Poll(
                     id=12345, 
@@ -135,7 +152,7 @@ async def handler(event):
 
         print("✅ Пост опубликован в @s_ostatok!")
         
-        # Чистим историю для ИИ
+        # История
         clean_summary = news_text.replace('<blockquote>', '').replace('</blockquote>', '').replace('<b>', '').replace('</b>', '')[:100]
         published_topics.append(clean_summary)
         if len(published_topics) > 10: published_topics.pop(0)
@@ -143,10 +160,11 @@ async def handler(event):
     except Exception as e:
         print(f"Ошибка отправки: {e}")
     finally:
-        # Удаляем файл с сервера
+        # Важно: удаляем видео/фото, чтобы не забить диск
         if path and os.path.exists(path):
             os.remove(path)
+            print("🗑 Временный файл удален")
 
-print("Бот запущен! (v: Clean Photo & Fix Polls)")
+print("Бот запущен! (v: Video + Photo + Text + Polls)")
 client.start()
 client.run_until_disconnected()
