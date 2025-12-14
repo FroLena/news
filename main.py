@@ -10,7 +10,7 @@ OPENAI_KEY = os.environ.get('OPENAI_API_KEY')
 
 # Настройки каналов (без @)
 SOURCE_CHANNELS = ['rian_ru', 'rentv_channel', 'breakingmash', 'bazabazon']
-DESTINATION = 'me' 
+DESTINATION = '@s_ostatok' 
 
 # 2. Настраиваем подключение к нейросети (Умный выбор)
 # Если ключ начинается на sk-or, значит это OpenRouter
