@@ -1,3 +1,4 @@
-telethon
+telethon>=1.36.0
 openai
 python-dotenv
+nest_asyncio
