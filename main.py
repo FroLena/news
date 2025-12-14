@@ -1,5 +1,7 @@
 import os
 import asyncio
+import json
+import requests # <--- Используем для прямой отправки запроса
 from telethon import TelegramClient, events, types, functions
 from openai import OpenAI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -18,13 +20,14 @@ DESTINATION = '@s_ostatok'
 
 MAX_VIDEO_SIZE = 50 * 1024 * 1024 
 
-# 2. OpenAI
+# 2. OpenAI (Для текста)
 print("Использую OpenRouter...")
 gpt_client = OpenAI(
     api_key=OPENAI_KEY, 
     base_url="https://openrouter.ai/api/v1"
 )
 AI_MODEL = "openai/gpt-4o-mini"
+# Модель для картинок
 IMAGE_MODEL = "black-forest-labs/flux-1-schnell"
 
 # 3. Клиент
@@ -32,20 +35,41 @@ client = TelegramClient('amvera_session', API_ID, API_HASH)
 raw_text_cache = []
 published_topics = []
 
-# --- ГЕНЕРАЦИЯ КАРТИНКИ ---
+# --- ГЕНЕРАЦИЯ КАРТИНКИ (ПРЯМОЙ ЗАПРОС) ---
 async def generate_image(prompt_text):
-    print(f"🎨 Рисую иллюстрацию: {prompt_text[:50]}...")
+    print(f"🎨 Рисую иллюстрацию (Direct Request): {prompt_text[:50]}...")
+    
+    url = "https://openrouter.ai/api/v1/images/generations"
+    
+    headers = {
+        "Authorization": f"Bearer {OPENAI_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://amvera.ru", # OpenRouter просит эти заголовки
+        "X-Title": "NewsBot"
+    }
+    
+    data = {
+        "model": IMAGE_MODEL,
+        "prompt": prompt_text,
+        "n": 1,
+        "size": "1024x1024" # Flux работает лучше всего с квадратом
+    }
+
     try:
-        response = gpt_client.images.generate(
-            model=IMAGE_MODEL,
-            prompt=prompt_text,
-            n=1,
-            size="1024x1024"
-        )
-        image_url = response.data[0].url
-        return image_url
+        # Делаем запрос в отдельном потоке, чтобы не блокировать бота
+        response = await asyncio.to_thread(requests.post, url, headers=headers, json=data)
+        
+        if response.status_code == 200:
+            result = response.json()
+            image_url = result['data'][0]['url']
+            print("🎨 Картинка успешно создана!")
+            return image_url
+        else:
+            print(f"⚠️ Ошибка API OpenRouter: {response.status_code} - {response.text}")
+            return None
+            
     except Exception as e:
-        print(f"⚠️ Ошибка генерации картинки: {e}")
+        print(f"⚠️ Ошибка запроса картинки: {e}")
         return None
 
 # --- ПОДКАСТ ---
@@ -94,12 +118,13 @@ async def rewrite_news(text, history_topics):
         f"Часть 2: Промпт для картинки (English)\n\n"
         f"ПРАВИЛА ТЕКСТА:\n"
         f"- Реклама -> SKIP. Дубли -> DUPLICATE.\n"
-        f"- Сократи суть. В конце: <blockquote><b>📌 Суть:</b> [вывод]</blockquote>\n\n"
+        f"- Сократи суть. В конце: <blockquote><b>📌 Суть:</b> [вывод]</blockquote>\n"
+        f"- Острые темы: ||R:🔥|| в начало, ||POLL|| в конец.\n\n"
         f"ПРАВИЛА КАРТИНКИ (ОБЯЗАТЕЛЬНО):\n"
-        f"- Всегда придумывай описание сцены на английском.\n"
+        f"- Промпт строго на английском.\n"
         f"- Стиль: 'Hyperrealistic documentary photo, cinematic lighting, 8k'.\n"
         f"- Пример ответа:\n"
-        f"Пожарные потушили склад... ||| A photo of firefighters at night in Moscow, smoke, orange fire lights, wet asphalt."
+        f"Пожар на складе... ||| A photo of firefighters at night in Moscow, smoke, orange fire lights, wet asphalt."
     )
 
     try:
@@ -126,15 +151,12 @@ async def handler(event):
     raw_text_cache.append(short_hash)
     if len(raw_text_cache) > 100: raw_text_cache.pop(0)
 
-    # Логируем название канала, если юзернейм скрыт
     chat_title = event.chat.title if hasattr(event.chat, 'title') else str(event.chat_id)
     print(f"🔎 Обработка: {chat_title}")
     
     full_response = await rewrite_news(text, published_topics)
     if not full_response: return
 
-    # ОТЛАДКА: Показываем, что вернул ИИ (первые 100 символов)
-    # Это поможет понять, есть ли там разделитель
     print(f"🤖 Ответ AI (начало): {full_response[:100]}...")
 
     if "DUPLICATE" in full_response:
@@ -144,7 +166,7 @@ async def handler(event):
         print(f"🗑 Реклама")
         return
 
-    # --- ПАРСИНГ ---
+    # Парсинг
     news_text = full_response
     image_prompt = None
     
@@ -154,19 +176,18 @@ async def handler(event):
         image_prompt = parts[1].strip()
         print("✅ Промпт найден!")
     else:
-        # ЗАПАСНОЙ ВАРИАНТ (Если ИИ забыл разделитель)
-        # Если в исходном посте было фото, а ИИ промпт не дал — принудительно генерируем
+        # Fallback генерация
         if event.message.photo:
-            print("⚠️ ИИ забыл промпт! Генерирую автоматически по тексту...")
-            # Берем первое предложение текста для промпта + стиль
+            print("⚠️ ИИ забыл промпт! Генерирую авто-промпт...")
             base_prompt = news_text.split('.')[0] if '.' in news_text else news_text[:50]
-            image_prompt = f"Hyperrealistic documentary photo: {base_prompt}. Cinematic lighting, 8k, highly detailed."
-            
+            # Транслитерацию делать сложно без библиотек, надеемся что Flux поймет или возьмем просто "Breaking news" стиль
+            # Лучше попросить GPT перевести, но для скорости просто сделаем общий промпт
+            image_prompt = f"Hyperrealistic documentary photo reflecting the news topic. Cinematic lighting, 8k. Context: {base_prompt}"
+            news_text = full_response
         else:
-            print("⚠️ Разделитель ||| не найден. Будет только текст.")
             news_text = full_response
 
-    # Парсинг допов
+    # Допы
     poll_data = None
     reaction = None
     if "||R:" in news_text:
@@ -184,12 +205,11 @@ async def handler(event):
             if len(lines) >= 3: poll_data = {"q": lines[0], "o": [o for o in lines[1:] if o.strip()]}
         except: pass
 
-    # --- ОТПРАВКА ---
+    # Отправка
     sent_msg = None
     try:
         has_video = event.message.video is not None
         
-        # 1. ВИДЕО (Оригинал)
         if has_video:
             if event.message.file.size > MAX_VIDEO_SIZE:
                 sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
@@ -199,7 +219,6 @@ async def handler(event):
                 sent_msg = await client.send_file(DESTINATION, path, caption=news_text, parse_mode='html', supports_streaming=True)
                 os.remove(path)
         
-        # 2. ГЕНЕРАЦИЯ ФОТО
         elif image_prompt:
             img_url = await generate_image(image_prompt)
             if img_url:
@@ -207,11 +226,9 @@ async def handler(event):
             else:
                 sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
         
-        # 3. ТОЛЬКО ТЕКСТ
         else:
             sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
 
-        # Допы
         if sent_msg and reaction:
             await asyncio.sleep(2)
             try: await client(functions.messages.SendReactionRequest(peer=DESTINATION, msg_id=sent_msg.id, reaction=[types.ReactionEmoji(emoticon=reaction)]))
@@ -234,5 +251,5 @@ if __name__ == '__main__':
     scheduler = AsyncIOScheduler(event_loop=client.loop)
     scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
     scheduler.start()
-    print("🤖 Бот запущен! (Debug Mode + Auto-Prompt)")
+    print("🤖 Бот запущен! (Fixed: 405 Error)")
     client.run_until_disconnected()
