@@ -1,7 +1,7 @@
 import os
 import asyncio
 import json
-import requests
+import httpx # <--- Используем современную библиотеку для запросов
 from telethon import TelegramClient, events, types, functions
 from openai import OpenAI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -34,7 +34,7 @@ client = TelegramClient('amvera_session', API_ID, API_HASH)
 raw_text_cache = []
 published_topics = []
 
-# --- ГЕНЕРАЦИЯ КАРТИНКИ (ПРЯМОЙ ЗАПРОС) ---
+# --- ГЕНЕРАЦИЯ КАРТИНКИ (НОВЫЙ МЕТОД HTTPX) ---
 async def generate_image(prompt_text):
     clean_prompt = prompt_text.replace('||', '').replace('R:', '').strip()
     print(f"🎨 Рисую (Flux): {clean_prompt[:50]}...")
@@ -52,18 +52,29 @@ async def generate_image(prompt_text):
         "n": 1,
         "size": "1024x1024"
     }
-    try:
-        response = await asyncio.to_thread(requests.post, url, headers=headers, json=data)
-        if response.status_code == 200:
-            return response.json()['data'][0]['url']
-        else:
-            print(f"⚠️ Ошибка API OpenRouter ({response.status_code}): {response.text}")
+    
+    # Используем асинхронный клиент с таймаутом 30 секунд
+    async with httpx.AsyncClient(timeout=30.0) as http_client:
+        try:
+            response = await http_client.post(url, headers=headers, json=data)
+            
+            if response.status_code == 200:
+                result = response.json()
+                return result['data'][0]['url']
+            else:
+                # Если ошибка, попробуем прочитать тело ответа, чтобы понять причину
+                error_body = response.text
+                print(f"⚠️ Ошибка API OpenRouter ({response.status_code}): {error_body[:200]}")
+                return None
+                
+        except httpx.RequestError as e:
+            print(f"⚠️ Ошибка сети при запросе картинки: {e}")
             return None
-    except Exception as e:
-        print(f"⚠️ Критическая ошибка запроса: {e}")
-        return None
+        except Exception as e:
+            print(f"⚠️ Неизвестная ошибка генерации: {e}")
+            return None
 
-# --- ПОДКАСТ (ТВОЙ ПРОМПТ) ---
+# --- ПОДКАСТ ---
 async def send_evening_podcast():
     print("🎙 Готовлю подкаст...")
     try:
@@ -99,12 +110,11 @@ async def send_evening_podcast():
     except Exception as e:
         print(f"❌ Ошибка подкаста: {e}")
 
-# --- AI РЕДАКТОР (ИСПРАВЛЕННЫЙ ПРОМПТ) ---
+# --- AI РЕДАКТОР ---
 async def rewrite_news(text, history_topics):
     recent_history = history_topics[-5:] if len(history_topics) > 0 else []
     history_str = "\n".join([f"- {t}" for t in recent_history]) if recent_history else "Нет истории."
 
-    # === ВЕРНУЛ ПОТЕРЯННУЮ ЧАСТЬ ПРОМПТА ===
     system_prompt = (
         f"Ты — главный редактор новостного канала «Сухой остаток». История тем: {history_str}\n\n"
         f"ФОРМАТ ОТВЕТА СТРОГО: ТЕКСТ ||| ПРОМПТ_КАРТИНКИ\n\n"
@@ -154,12 +164,8 @@ async def handler(event):
     full_response = await rewrite_news(text, published_topics)
     if not full_response: return
 
-    if "DUPLICATE" in full_response: 
-        print("❌ Дубль")
-        return
-    if "SKIP" in full_response: 
-        print("🗑 Реклама")
-        return
+    if "DUPLICATE" in full_response: return
+    if "SKIP" in full_response: return
 
     # --- ПАРСИНГ ---
     raw_text = full_response
@@ -193,7 +199,7 @@ async def handler(event):
             if len(lines) >= 3: poll_data = {"q": lines[0], "o": [o for o in lines[1:] if o.strip()]}
         except: pass
 
-    # Fallback (авто-промпт)
+    # Fallback
     if not image_prompt and event.message.photo:
         print("⚠️ Генерирую авто-промпт из текста...")
         base_prompt = news_text.replace('\n', ' ')[:150]
@@ -217,6 +223,7 @@ async def handler(event):
             if img_url:
                 sent_msg = await client.send_file(DESTINATION, img_url, caption=news_text, parse_mode='html')
             else:
+                # Если генерация не удалась, отправляем текст без фото
                 sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
         else:
             sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
@@ -249,5 +256,5 @@ if __name__ == '__main__':
     scheduler = AsyncIOScheduler(event_loop=client.loop)
     scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
     scheduler.start()
-    print("🤖 Бот запущен! (Image Generation FIX)")
+    print("🤖 Бот запущен! (HTTPX Image Fix)")
     client.run_until_disconnected()
