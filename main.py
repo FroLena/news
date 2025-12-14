@@ -36,7 +36,10 @@ published_topics = []
 
 # --- ГЕНЕРАЦИЯ КАРТИНКИ (ПРЯМОЙ ЗАПРОС) ---
 async def generate_image(prompt_text):
-    print(f"🎨 Рисую иллюстрацию: {prompt_text[:50]}...")
+    # Чистим промпт от мусора
+    clean_prompt = prompt_text.replace('||', '').replace('R:', '').strip()
+    print(f"🎨 Рисую (Flux): {clean_prompt[:50]}...")
+    
     url = "https://openrouter.ai/api/v1/images/generations"
     headers = {
         "Authorization": f"Bearer {OPENAI_KEY}",
@@ -46,7 +49,7 @@ async def generate_image(prompt_text):
     }
     data = {
         "model": IMAGE_MODEL,
-        "prompt": prompt_text,
+        "prompt": clean_prompt,
         "n": 1,
         "size": "1024x1024"
     }
@@ -55,13 +58,13 @@ async def generate_image(prompt_text):
         if response.status_code == 200:
             return response.json()['data'][0]['url']
         else:
-            print(f"⚠️ Ошибка API OpenRouter: {response.status_code}")
+            print(f"⚠️ Ошибка API OpenRouter ({response.status_code}): {response.text}")
             return None
     except Exception as e:
-        print(f"⚠️ Ошибка запроса картинки: {e}")
+        print(f"⚠️ Критическая ошибка запроса: {e}")
         return None
 
-# --- ПОДКАСТ (НОВЫЙ ПРОМПТ) ---
+# --- ПОДКАСТ (ТВОЙ НОВЫЙ ПРОМПТ) ---
 async def send_evening_podcast():
     print("🎙 Готовлю подкаст...")
     try:
@@ -72,7 +75,7 @@ async def send_evening_podcast():
         if not history_posts: return
         full_text = "\n\n".join(history_posts[:20])
 
-        # === ОБНОВЛЕННЫЙ ПРОМПТ ДАЙДЖЕСТА ===
+        # === ПРОМПТ ПОДКАСТА ===
         system_prompt = (
             "Ты — профессиональный радиоведущий итогового шоу «Сухой остаток».\n"
             "Твоя задача: Создать увлекательный сценарий на основе предоставленных новостей за день.\n\n"
@@ -98,12 +101,12 @@ async def send_evening_podcast():
     except Exception as e:
         print(f"❌ Ошибка подкаста: {e}")
 
-# --- AI РЕДАКТОР (НОВЫЙ ПРОМПТ) ---
+# --- AI РЕДАКТОР (ТВОЙ НОВЫЙ ПРОМПТ) ---
 async def rewrite_news(text, history_topics):
     recent_history = history_topics[-5:] if len(history_topics) > 0 else []
     history_str = "\n".join([f"- {t}" for t in recent_history]) if recent_history else "Нет истории."
 
-    # === ОБНОВЛЕННЫЙ ПРОМПТ РЕДАКТОРА ===
+    # === ПРОМПТ РЕДАКТОРА ===
     system_prompt = (
         f"Ты — главный редактор новостного канала «Сухой остаток». История тем: {history_str}\n\n"
         f"ФОРМАТ ОТВЕТА СТРОГО: ТЕКСТ ||| ПРОМПТ_КАРТИНКИ\n\n"
@@ -141,43 +144,45 @@ async def handler(event):
     raw_text_cache.append(short_hash)
     if len(raw_text_cache) > 100: raw_text_cache.pop(0)
 
-    print(f"🔎 Обработка новости...")
+    try:
+        chat = await event.get_chat()
+        source_name = chat.title
+    except:
+        source_name = "Неизвестный канал"
+    
+    print(f"🔎 Обработка новости из: {source_name}")
     
     full_response = await rewrite_news(text, published_topics)
     if not full_response: return
 
-    if "DUPLICATE" in full_response: return
-    if "SKIP" in full_response: return
+    if "DUPLICATE" in full_response: 
+        print("❌ Дубль")
+        return
+    if "SKIP" in full_response: 
+        print("🗑 Реклама")
+        return
 
     # --- ПАРСИНГ ---
-    news_text = full_response
+    raw_text = full_response
     image_prompt = None
     
-    # 1. Отделяем картинку от текста
-    if "|||" in full_response:
-        parts = full_response.split("|||")
+    if "|||" in raw_text:
+        parts = raw_text.split("|||")
         news_text = parts[0].strip()
         image_prompt = parts[1].strip()
     else:
-        # Fallback
-        if event.message.photo:
-            base_prompt = news_text.split('.')[0] if '.' in news_text else "News"
-            image_prompt = f"Hyperrealistic documentary photo reflecting: {base_prompt}. Cinematic, 8k."
-            news_text = full_response
+        news_text = raw_text.strip()
 
-    # 2. Ищем Реакцию
     reaction = None
     if "||R:" in news_text:
         try:
             parts = news_text.split("||R:")
             subparts = parts[1].split("||")
-            reaction = subparts[0].strip() 
+            reaction = subparts[0].strip()
             news_text = subparts[1].strip()
-            print(f"😎 Найдена реакция: {reaction}")
-        except:
-            print("⚠️ Ошибка парсинга реакции")
+            print(f"😎 Реакция: {reaction}")
+        except: pass
 
-    # 3. Ищем Опрос
     poll_data = None
     if "||POLL||" in news_text:
         try:
@@ -186,6 +191,12 @@ async def handler(event):
             lines = p[1].strip().split('\n')
             if len(lines) >= 3: poll_data = {"q": lines[0], "o": [o for o in lines[1:] if o.strip()]}
         except: pass
+
+    # Fallback (используем стиль из твоего промпта)
+    if not image_prompt and event.message.photo:
+        print("⚠️ ИИ забыл промпт. Генерирую авто-промпт...")
+        base_prompt = news_text.replace('\n', ' ')[:100]
+        image_prompt = f"Hyperrealistic documentary photo, award-winning journalism, cinematic lighting, 8k. Context: {base_prompt}"
 
     # --- ОТПРАВКА ---
     sent_msg = None
@@ -199,6 +210,7 @@ async def handler(event):
                 path = await event.download_media()
                 sent_msg = await client.send_file(DESTINATION, path, caption=news_text, parse_mode='html', supports_streaming=True)
                 os.remove(path)
+        
         elif image_prompt:
             img_url = await generate_image(image_prompt)
             if img_url:
@@ -208,7 +220,6 @@ async def handler(event):
         else:
             sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
 
-        # --- СТАВИМ РЕАКЦИЮ ---
         if sent_msg and reaction:
             await asyncio.sleep(2)
             try:
@@ -217,18 +228,16 @@ async def handler(event):
                     msg_id=sent_msg.id,
                     reaction=[types.ReactionEmoji(emoticon=reaction)]
                 ))
-            except Exception as e:
-                print(f"⚠️ Не удалось поставить реакцию: {e}")
+            except: pass
 
-        # --- СТАВИМ ОПРОС ---
         if poll_data:
             await asyncio.sleep(1)
             poll_media = types.InputMediaPoll(poll=types.Poll(id=1, question=poll_data["q"], answers=[types.PollAnswer(text=o, option=bytes([i])) for i, o in enumerate(poll_data["o"])]))
             await client.send_message(DESTINATION, file=poll_media)
 
+        print("✅ Пост готов!")
         published_topics.append(news_text[:100])
         if len(published_topics) > 10: published_topics.pop(0)
-        print("✅ Пост готов!")
 
     except Exception as e:
         print(f"Ошибка отправки: {e}")
@@ -239,5 +248,5 @@ if __name__ == '__main__':
     scheduler = AsyncIOScheduler(event_loop=client.loop)
     scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
     scheduler.start()
-    print("🤖 Бот запущен! (New Prompts)")
+    print("🤖 Бот запущен! (Final User Prompts)")
     client.run_until_disconnected()
