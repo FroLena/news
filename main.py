@@ -6,7 +6,6 @@ import urllib.parse
 from telethon import TelegramClient, events, types, functions
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import edge_tts
-import re
 
 # 1. Настройки
 API_ID = int(os.environ.get('TG_API_ID'))
@@ -32,14 +31,12 @@ published_topics = []
 # --- ПРЯМОЙ ЗАПРОС К GPT ---
 async def ask_gpt_direct(system_prompt, user_text):
     url = "https://openrouter.ai/api/v1/chat/completions"
-    
     headers = {
         "Authorization": f"Bearer {OPENAI_KEY}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://amvera.ru",
         "X-Title": "NewsBot"
     }
-    
     payload = {
         "model": AI_MODEL,
         "messages": [
@@ -63,7 +60,7 @@ async def ask_gpt_direct(system_prompt, user_text):
     print("❌ Не удалось получить ответ от GPT.")
     return None
 
-# --- ГЕНЕРАЦИЯ КАРТИНКИ (Pollinations) ---
+# --- ГЕНЕРАЦИЯ КАРТИНКИ (Realism Update) ---
 async def generate_image(prompt_text):
     clean_prompt = prompt_text.replace('||', '').replace('R:', '').strip()
     print(f"🎨 Рисую (Flux): {clean_prompt[:50]}...")
@@ -71,6 +68,7 @@ async def generate_image(prompt_text):
     encoded_prompt = urllib.parse.quote(clean_prompt)
     import random
     seed = random.randint(1, 1000000)
+    # nologo=true, model=flux-realism (если доступна) или flux
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&model=flux&seed={seed}&nologo=true"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
 
@@ -122,27 +120,41 @@ async def send_evening_podcast():
     except Exception as e:
         print(f"❌ Ошибка подкаста: {e}")
 
-# --- AI РЕДАКТОР (ИСПРАВЛЕННЫЙ ФИЛЬТР) ---
+# --- AI РЕДАКТОР (IRON CONSTITUTION) ---
 async def rewrite_news(text, history_topics):
     history_str = "\n".join([f"- {t}" for t in history_topics[-15:]]) if history_topics else "Нет истории."
 
+    # === ЖЕЛЕЗНЫЙ ПРОМПТ ===
     system_prompt = (
-        f"Ты — главный редактор новостного канала. Твоя задача — умный фильтр и рерайт.\n\n"
+        f"Ты — главный редактор новостного канала 'Сухой остаток'.\n\n"
         f"ИСТОРИЯ (Уже было): {history_str}\n\n"
-        f"АЛГОРИТМ ДЕЙСТВИЙ:\n"
-        f"1. ДУБЛИ: Если событие уже есть в Истории (даже с новыми деталями) -> верни DUPLICATE.\n"
-        f"2. МУСОР (ВАЖНО): \n"
-        f"   - ИГНОРИРУЙ стандартные 'подписывайтесь на канал' в конце текста.\n"
-        f"   - Если САМ ТЕКСТ новости — это реклама, спам или продажа -> верни SKIP.\n"
-        f"   - Если это реальная новость -> ОБРАБАТЫВАЙ.\n"
-        f"3. РЕРАЙТ (Russian HTML):\n"
-        f"   - Перепиши своими словами, жестко, коротко.\n"
-        f"   - Заголовок: жирный, без слова 'Заголовок'.\n"
-        f"   - В конце: <blockquote><b>📌 Суть:</b> [Вывод]</blockquote>\n"
-        f"   - В начале: ||R:🔥||\n"
-        f"   - Если нужно: ||POLL||\n\n"
-        f"ФОРМАТ ОТВЕТА: ТЕКСТ ||| ПРОМПТ_КАРТИНКИ\n"
-        f"(Промпт картинки: English, Hyperrealistic documentary photo, no text)."
+        f"ТВОЙ ЗАКОН (Инструкция):\n"
+        f"1. ПРОВЕРКА НА ДУБЛИ:\n"
+        f"   - Если событие уже есть в Истории (даже с новыми мелкими деталями) -> ВЕРНИ: DUPLICATE\n"
+        f"   - Если появились ВАЖНЫЕ подробности (число жертв, причина, заявление властей) -> ЭТО НОВАЯ НОВОСТЬ.\n"
+        f"2. ПРОВЕРКА НА СПАМ:\n"
+        f"   - Игнорируй приписки 'Подпишись на канал', 'Ставь лайк'. Это НЕ спам.\n"
+        f"   - Если ВЕСЬ текст — реклама, продажа, другой канал -> ВЕРНИ: SKIP\n"
+        f"3. ОБРАБОТКА ТЕКСТА (СТРОГО РУССКИЙ ЯЗЫК):\n"
+        f"   - Переведи, если источник иностранный.\n"
+        f"   - СТИЛЬ: Инфостиль. Убирай воду. Сокращай текст на 30-50% без потери смысла.\n"
+        f"   - ЗАГОЛОВОК: Телеграм-стиль (Яркий, но честный). Жирный шрифт. Без слова 'Заголовок'.\n"
+        f"   - ЦИТАТЫ: Переводи прямую речь в косвенную ('Он заявил, что...').\n"
+        f"   - ТОН: Обезличенный (Без 'мы', 'нам').\n"
+        f"4. СТРУКТУРА ОТВЕТА:\n"
+        f"   ||R:🔥|| <b>Заголовок</b>\n"
+        f"   (Пустая строка)\n"
+        f"   Текст новости (2-3 предложения).\n"
+        f"   <blockquote><b>📌 Суть:</b> [Вывод одним предложением]</blockquote>\n"
+        f"   (Если новость острая) ||POLL||\n"
+        f"   Вопрос?\n"
+        f"   Вариант 1\n"
+        f"   Вариант 2\n\n"
+        f"=== ЧАСТЬ 2: ПРОМПТ КАРТИНКИ (English) ===\n"
+        f"- Description of the scene.\n"
+        f"- Keywords for realism: 'Raw candid photo, film grain, shot on Canon 5D, 4k news footage, journalism, realistic lighting, dirty realism, no CGI, no 3D render'.\n"
+        f"- NO TEXT on image.\n"
+        f"ФОРМАТ ВЫВОДА СТРОГО: ТЕКСТ ||| ПРОМПТ_КАРТИНКИ"
     )
 
     return await ask_gpt_direct(system_prompt, text)
@@ -211,7 +223,7 @@ async def handler(event):
     if not image_prompt and event.message.photo:
         print("⚠️ Генерирую авто-промпт...")
         base_prompt = news_text.replace('\n', ' ')[:150]
-        image_prompt = f"Hyperrealistic documentary photo, award-winning journalism, cinematic lighting, 8k. Context: {base_prompt}"
+        image_prompt = f"Raw photo, journalism style, realistic lighting, 4k. Context: {base_prompt}"
 
     # --- ОТПРАВКА ---
     path_to_image = None
@@ -261,7 +273,6 @@ async def handler(event):
 
         print("✅ Пост готов!")
         
-        # Сохраняем "Суть" для истории
         essence = news_text
         if "📌 Суть:" in news_text:
             try: essence = news_text.split("📌 Суть:")[1].replace("</blockquote>", "").strip()
@@ -282,5 +293,5 @@ if __name__ == '__main__':
     scheduler = AsyncIOScheduler(event_loop=client.loop)
     scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
     scheduler.start()
-    print("🤖 Бот запущен! (Smarter Trash Filter)")
+    print("🤖 Бот запущен! (IRON PROMPT)")
     client.run_until_disconnected()
