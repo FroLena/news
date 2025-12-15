@@ -7,6 +7,8 @@ import time
 from telethon import TelegramClient, events, types, functions
 from telethon.sessions import StringSession
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from stats import stats_db
+from scheduler import start_scheduler
 import edge_tts
 
 # 1. Настройки
