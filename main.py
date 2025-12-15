@@ -62,15 +62,18 @@ async def ask_gpt_direct(system_prompt, user_text):
 
 # --- ГЕНЕРАЦИЯ КАРТИНКИ ---
 async def generate_image(prompt_text):
-    clean_prompt = prompt_text.replace('||', '').replace('R:', '')
-    clean_prompt = clean_prompt.replace('=== ЧАСТЬ 2: ПРОМПТ КАРТИНКИ ===', '').strip()
+    # Чистим от возможных остатков разметки
+    clean_prompt = prompt_text.replace('|||', '').strip()
+    # Убираем технические заголовки, если ИИ вдруг их оставил
+    clean_prompt = clean_prompt.replace('=== ПРОМПТ ДЛЯ КАРТИНКИ (English) ===', '').strip()
     
-    print(f"🎨 Рисую (Flux): {clean_prompt[:50]}...")
+    print(f"🎨 Рисую (Flux): {clean_prompt[:60]}...")
     
     encoded_prompt = urllib.parse.quote(clean_prompt)
     import random
     seed = random.randint(1, 1000000)
-    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&model=flux&seed={seed}&nologo=true"
+    # Используем Flux Realism для лучшего качества
+    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&model=flux-realism&seed={seed}&nologo=true"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
 
     for attempt in range(3):
@@ -121,37 +124,34 @@ async def send_evening_podcast():
     except Exception as e:
         print(f"❌ Ошибка подкаста: {e}")
 
-# --- AI РЕДАКТОР (С ЯВНЫМИ РЕАКЦИЯМИ) ---
+# --- AI РЕДАКТОР (НОВЫЙ ЖЕСТКИЙ ВИЗУАЛЬНЫЙ ПРОМПТ) ---
 async def rewrite_news(text, history_topics):
     history_str = "\n".join([f"- {t}" for t in history_topics[-15:]]) if history_topics else "Нет истории."
 
     system_prompt = (
-        f"Ты — строгий редактор канала 'Сухой остаток'.\n"
+        f"Ты — главный редактор канала 'Сухой остаток'.\n"
         f"ИСТОРИЯ: {history_str}\n\n"
-        f"АЛГОРИТМ РАБОТЫ:\n\n"
-        f"1. 🚨 РЕКЛАМА -> ВЕРНИ: SKIP\n"
-        f"   (Если в тексте есть 'Реклама', 'erid', продажа услуг, ссылка на канал. Обычную просьбу подписаться — игнорируй, это не реклама).\n"
-        f"2. 🔄 ДУБЛИ -> ВЕРНИ: DUPLICATE\n"
-        f"   (Если событие уже было в Истории).\n\n"
+        f"=== ЧАСТЬ 1: РАБОТА С ТЕКСТОМ ===\n"
+        f"1. 🚨 РЕКЛАМА -> ВЕРНИ: SKIP (Если есть 'Реклама', 'erid', продажа).\n"
+        f"2. 🔄 ДУБЛИ -> ВЕРНИ: DUPLICATE (Если событие уже было).\n"
         f"3. ✍️ РЕРАЙТ (Русский язык):\n"
-        f"   - Перепиши инфостилем, убери воду.\n"
-        f"   - Заголовок: Жирный, без слова 'Заголовок'.\n"
-        f"   - Структура: Реакция -> Заголовок -> Текст -> Суть -> Опрос (если нужен).\n\n"
-        f"4. 😂 РЕАКЦИИ (ВЫБЕРИ ОДНУ ПО СМЫСЛУ):\n"
-        f"   - Если новость горячая/срочная: ||R:🔥||\n"
-        f"   - Если новость глупая/смешная: ||R:🤡||\n"
-        f"   - Если новость грустная/трагичная: ||R:😢||\n"
-        f"   - Если новость шокирующая: ||R:⚡️||\n"
-        f"   - Если новость хорошая: ||R:👍||\n\n"
-        f"5. 🎨 КАРТИНКА (English):\n"
-        f"   - Hyperrealistic, film grain, raw candid photo, journalism, 4k.\n\n"
-        f"ВАЖНО: В ОТВЕТЕ НЕ ПИШИ ТЕХНИЧЕСКИЕ ЗАГОЛОВКИ.\n"
-        f"ФОРМАТ ВЫВОДА:\n"
-        f"||R:🔥|| <b>Заголовок</b>\n"
-        f"Текст новости...\n"
-        f"<blockquote><b>📌 Суть:</b> Вывод.</blockquote>\n"
+        f"   - Инфостиль, без воды, без 'мы'/'нам'.\n"
+        f"   - Заголовок: Жирный, яркий. Цитаты: в косвенную речь.\n"
+        f"   - Структура: Реакция -> Заголовок -> Текст -> Суть -> Опрос (если нужен).\n"
+        f"   - Реакции: ||R:🔥|| (срочно), ||R:🤡|| (смешно), ||R:😢|| (грустно), ||R:⚡️|| (шок), ||R:👍|| (позитив).\n\n"
+        f"=== ЧАСТЬ 2: ГЕНЕРАЦИЯ ПРОМПТА ДЛЯ КАРТИНКИ (English) ===\n"
+        f"Твоя задача — превратить текст новости в визуальную сцену.\n"
+        f"1. АНАЛИЗ: Выдели главные визуальные объекты (кто? где? что делают?).\n"
+        f"2. ПЕРЕВОД: Опиши эту сцену на английском языке для генератора картинок.\n"
+        f"3. ПРАВИЛА ОПИСАНИЯ:\n"
+        f"   - ТОЛЬКО физические объекты. Никаких абстракций ('политические разногласия', 'кризис'). Если новость про политику — рисуй здание парламента или политика за трибуной. Если про панд — рисуй панд в зоопарке.\n"
+        f"   - Детализируй: время суток, погода, освещение, эмоции людей на фото.\n"
+        f"4. СТИЛЬ (Добавляй в конец каждого промпта):\n"
+        f"   '... Documentary photograph, highly detailed, realistic film grain, cinematic lighting, shot on Canon 5D, 4k journalism.'\n\n"
+        f"ФОРМАТ ВЫВОДА (СТРОГО):\n"
+        f"[Текст новости с разметкой]\n"
         f"|||\n"
-        f"Detailed description of the scene..."
+        f"[Твой подробный промпт на английском]"
     )
 
     return await ask_gpt_direct(system_prompt, text)
@@ -189,28 +189,24 @@ async def handler(event):
     raw_text = full_response
     image_prompt = None
     
-    # Защита от кривого формата
     if "|||" in full_response:
         parts = full_response.split("|||")
         news_text = parts[0].strip()
-        if len(parts) > 1: image_prompt = parts[1].strip()
-    elif "=== ЧАСТЬ 2" in full_response:
-        parts = full_response.split("=== ЧАСТЬ 2")
-        news_text = parts[0].strip()
-        image_prompt = parts[1].strip()
+        if len(parts) > 1 and parts[1].strip():
+            image_prompt = parts[1].strip()
     else:
+        # Если разделителя нет, считаем всё текстом и не генерируем картинку
         news_text = full_response.strip()
 
-    news_text = news_text.replace("=== ЧАСТЬ 1: ТЕКСТ (Russian HTML) ===", "").strip()
-    news_text = news_text.replace("=== ЧАСТЬ 1 ===", "").strip()
+    # Чистка от возможных технических заголовков, если они все же просочились
+    news_text = news_text.replace("=== ЧАСТЬ 1: РАБОТА С ТЕКСТОМ ===", "").strip()
 
-    # --- ПАРСИНГ РЕАКЦИИ ---
     reaction = None
     if "||R:" in news_text:
         try:
             parts = news_text.split("||R:")
             subparts = parts[1].split("||")
-            reaction = subparts[0].strip() # Вот тут бот ловит твоего клоуна или огонек
+            reaction = subparts[0].strip()
             news_text = subparts[1].strip()
             print(f"😎 Реакция: {reaction}")
         except: pass
@@ -226,10 +222,11 @@ async def handler(event):
                 poll_data = {"q": poll_lines[0], "o": poll_lines[1:]}
         except: pass
 
+    # Fallback: если ИИ не дал промпт, но в оригинале было фото - пробуем авто-промпт
     if not image_prompt and event.message.photo:
-        print("⚠️ Генерирую авто-промпт...")
-        base_prompt = news_text.replace('\n', ' ')[:150]
-        image_prompt = f"Raw photo, journalism style, realistic lighting, 4k. Context: {base_prompt}"
+        print("⚠️ ИИ не дал промпт, генерирую авто-промпт по контексту...")
+        base_prompt = news_text.replace('\n', ' ')[:200]
+        image_prompt = f"Documentary photograph capturing the scene described: {base_prompt}. Realistic film grain, cinematic lighting, 4k journalism."
 
     # --- ОТПРАВКА ---
     path_to_image = None
@@ -250,11 +247,11 @@ async def handler(event):
             if path_to_image and os.path.exists(path_to_image):
                 sent_msg = await client.send_file(DESTINATION, path_to_image, caption=news_text, parse_mode='html')
             else:
+                # Если картинка не сгенерировалась, шлем просто текст
                 sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
         else:
             sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
 
-        # --- ВОТ ТУТ СТАВИТСЯ РЕАКЦИЯ ---
         if sent_msg and reaction:
             await asyncio.sleep(2)
             try:
@@ -300,5 +297,5 @@ if __name__ == '__main__':
     scheduler = AsyncIOScheduler(event_loop=client.loop)
     scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
     scheduler.start()
-    print("🤖 Бот запущен! (Reactions Fix)")
+    print("🤖 Бот запущен! (Visual Director Mode)")
     client.run_until_disconnected()
