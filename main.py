@@ -5,13 +5,15 @@ import httpx
 import urllib.parse
 import time
 from telethon import TelegramClient, events, types, functions
+from telethon.sessions import StringSession # Важный импорт
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import edge_tts
 
-# 1. Настройки
+# 1. Настройки из переменных окружения
 API_ID = int(os.environ.get('TG_API_ID'))
 API_HASH = os.environ.get('TG_API_HASH')
 OPENAI_KEY = os.environ.get('OPENAI_API_KEY')
+SESSION_STRING = os.environ.get('TG_SESSION_STR') # Наша новая строка
 
 SOURCE_CHANNELS = [
     'rian_ru', 'rentv_channel', 'breakingmash', 'bazabazon', 
@@ -19,38 +21,34 @@ SOURCE_CHANNELS = [
 ]
 DESTINATION = '@s_ostatok'
 
-# --- НАСТРОЙКА ПУТЕЙ (РЕШЕНИЕ ПРОБЛЕМЫ PERSISTENCE) ---
-# Проверяем, есть ли папка /data (признак сервера Amvera)
+# --- НАСТРОЙКА ПУТЕЙ ---
+# Чтобы не было warnings про persistenceMount, историю пишем СТРОГО в /data
+# Проверяем, есть ли папка /data (признак сервера)
 if os.path.exists('/data'):
-    print("🖥 СРЕДА: СЕРВЕР. Использую постоянное хранилище /data")
-    # Файл истории сохраняем в вечную память
     HISTORY_FILE = '/data/history.json'
-    # Сессию берем из вечной памяти (туда ты её загрузишь руками)
-    SESSION_PATH = '/data/amvera_prod' 
 else:
-    print("💻 СРЕДА: ЛОКАЛЬНАЯ. Использую файлы рядом со скриптом")
-    HISTORY_FILE = 'history.json'
-    SESSION_PATH = 'local_test_session' # Другое имя для тестов на ПК
+    HISTORY_FILE = 'history.json' # Для локальных тестов
 
 MAX_VIDEO_SIZE = 50 * 1024 * 1024 
 AI_MODEL = "openai/gpt-4o-mini"
 
-# 2. Инициализация клиента
-# Бот попробует найти файл сессии по указанному пути.
-# На сервере он будет искать /data/amvera_prod.session
-client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
+# 2. Инициализация клиента (StringSession)
+# Теперь не создается никаких файлов .session, нет блокировок SQLite
+if not SESSION_STRING:
+    print("❌ ОШИБКА: Не найдена переменная TG_SESSION_STR!")
+    exit(1)
+
+client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
 raw_text_cache = []
 
-# --- ФУНКЦИИ ИСТОРИИ (С ЗАЩИТОЙ ОТ СТИРАНИЯ) ---
+# --- ФУНКЦИИ ИСТОРИИ ---
 def load_history():
-    # Если файла еще нет (первый запуск), возвращаем пустой список
     if not os.path.exists(HISTORY_FILE):
         return []
     try:
         with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            # Фильтр: оставляем только новости за последние 24 часа
             current_time = time.time()
             fresh_data = [item for item in data if current_time - item['timestamp'] < 86400]
             return fresh_data
@@ -64,16 +62,14 @@ def save_to_history(text_essence):
         'text': text_essence,
         'timestamp': time.time()
     })
-    # Храним последние 50 записей
     if len(history) > 50:
         history = history[-50:]
     
-    # Вот тут возникала ошибка! Теперь мы пишем в HISTORY_FILE, который ведет в /data
     try:
         with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
             json.dump(history, f, ensure_ascii=False, indent=4)
     except Exception as e:
-        print(f"❌ Ошибка записи в историю (/data): {e}")
+        print(f"❌ Ошибка записи истории в {HISTORY_FILE}: {e}")
 
 # --- GPT ЗАПРОС ---
 async def ask_gpt_direct(system_prompt, user_text):
@@ -111,6 +107,7 @@ async def generate_image(prompt_text):
     encoded_prompt = urllib.parse.quote(clean_prompt)
     import random
     seed = random.randint(1, 1000000)
+    # Используем Flux-Realism
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&model=flux-realism&seed={seed}&nologo=true"
     headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -169,7 +166,7 @@ async def rewrite_news(text):
         f"- Используй <b>жирный</b>. Markdown (**) НЕЛЬЗЯ.\n"
         f"- Инфостиль.\n"
         f"- Структура: Реакция -> Заголовок -> Текст -> Суть -> Опрос.\n\n"
-        f"ЧАСТЬ 3. ПРАВИЛА КАРТИНКИ (English):\n"
+        f"ЧАСТЬ 3. ПРАВИЛА КАРТИНКИ (English, Visual Safety):\n"
         f"- Описывай ФИЗИЧЕСКИЕ ОБЪЕКТЫ (люди, здания, машины).\n"
         f"- ЗАПРЕТ НА АБСТРАКЦИИ.\n"
         f"- КРИМИНАЛ: Не рисуй насилие. Рисуй 'Police car lights, building exterior'.\n\n"
@@ -212,7 +209,7 @@ async def handler(event):
         print(f"🗑 Отсечена реклама/мусор")
         return
 
-    # --- ПАРСИНГ И ОТПРАВКА (Стандартный блок) ---
+    # --- ПАРСИНГ ---
     raw_text = full_response
     image_prompt = None
     
@@ -296,7 +293,6 @@ async def handler(event):
             try: essence = news_text.split("📌 Суть:")[1].replace("</blockquote>", "").strip()
             except: pass
         
-        # Запись в историю в /data/history.json
         save_to_history(essence)
 
     except Exception as e:
@@ -307,9 +303,15 @@ async def handler(event):
 
 if __name__ == '__main__':
     print("🚀 Старт...")
+    # Создаем папку data, если её нет (на всякий случай)
+    if not os.path.exists('/data'):
+        try: os.makedirs('/data', exist_ok=True)
+        except: pass
+
     client.start()
     scheduler = AsyncIOScheduler(event_loop=client.loop)
     scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
     scheduler.start()
-    print("🤖 Бот запущен!")
+    print("🤖 Бот запущен! (StringSession Mode)")
+    client.run_until_disconnected()
     client.run_until_disconnected()
