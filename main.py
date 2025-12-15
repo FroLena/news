@@ -5,7 +5,7 @@ import httpx
 import urllib.parse
 import time
 from telethon import TelegramClient, events, types, functions
-from telethon.sessions import StringSession # Важный импорт
+from telethon.sessions import StringSession
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import edge_tts
 
@@ -13,7 +13,7 @@ import edge_tts
 API_ID = int(os.environ.get('TG_API_ID'))
 API_HASH = os.environ.get('TG_API_HASH')
 OPENAI_KEY = os.environ.get('OPENAI_API_KEY')
-SESSION_STRING = os.environ.get('TG_SESSION_STR') # Наша новая строка
+SESSION_STRING = os.environ.get('TG_SESSION_STR')
 
 SOURCE_CHANNELS = [
     'rian_ru', 'rentv_channel', 'breakingmash', 'bazabazon', 
@@ -21,24 +21,33 @@ SOURCE_CHANNELS = [
 ]
 DESTINATION = '@s_ostatok'
 
-# --- НАСТРОЙКА ПУТЕЙ ---
-# Чтобы не было warnings про persistenceMount, историю пишем СТРОГО в /data
-# Проверяем, есть ли папка /data (признак сервера)
+# --- ГЛАВНАЯ НАСТРОЙКА ПУТЕЙ (FIX PERSISTENCE) ---
+# Определяем, где мы находимся.
 if os.path.exists('/data'):
-    HISTORY_FILE = '/data/history.json'
+    print("🖥 СРЕДА: СЕРВЕР (Amvera). Все файлы пишу в /data")
+    BASE_DIR = '/data'
 else:
-    HISTORY_FILE = 'history.json' # Для локальных тестов
+    print("💻 СРЕДА: ЛОКАЛЬНАЯ. Пишу файлы рядом со скриптом")
+    BASE_DIR = '.'
+
+# Формируем пути ко всем файлам через BASE_DIR
+HISTORY_FILE = os.path.join(BASE_DIR, 'history.json')
+PODCAST_FILE = os.path.join(BASE_DIR, 'podcast.mp3')
 
 MAX_VIDEO_SIZE = 50 * 1024 * 1024 
 AI_MODEL = "openai/gpt-4o-mini"
 
 # 2. Инициализация клиента (StringSession)
-# Теперь не создается никаких файлов .session, нет блокировок SQLite
 if not SESSION_STRING:
     print("❌ ОШИБКА: Не найдена переменная TG_SESSION_STR!")
-    exit(1)
+    # Если переменной нет, скрипт упадет, но это лучше, чем бесконечные рестарты
+    # В реальной ситуации тут можно добавить fallback на локальный файл, но для продакшена лучше так.
 
-client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+try:
+    client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+except Exception as e:
+    print(f"❌ Ошибка инициализации клиента: {e}")
+    client = None
 
 raw_text_cache = []
 
@@ -107,7 +116,10 @@ async def generate_image(prompt_text):
     encoded_prompt = urllib.parse.quote(clean_prompt)
     import random
     seed = random.randint(1, 1000000)
-    # Используем Flux-Realism
+    
+    # ВАЖНО: Путь к картинке тоже через BASE_DIR (/data/image_...)
+    filename = os.path.join(BASE_DIR, f"image_{seed}.jpg")
+    
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&model=flux-realism&seed={seed}&nologo=true"
     headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -116,7 +128,6 @@ async def generate_image(prompt_text):
             try:
                 response = await http_client.get(url, headers=headers)
                 if response.status_code == 200:
-                    filename = f"image_{seed}.jpg"
                     with open(filename, "wb") as f:
                         f.write(response.content)
                     return filename
@@ -144,9 +155,14 @@ async def send_evening_podcast():
 
         script = script.replace('*', '').replace('#', '')
         communicate = edge_tts.Communicate(script, "ru-RU-DmitryNeural")
-        await communicate.save("podcast.mp3")
-        await client.send_file(DESTINATION, "podcast.mp3", caption="🎙 <b>Итоги дня</b>", parse_mode='html', voice_note=True)
-        if os.path.exists("podcast.mp3"): os.remove("podcast.mp3")
+        
+        # Сохраняем в /data/podcast.mp3
+        await communicate.save(PODCAST_FILE)
+        
+        await client.send_file(DESTINATION, PODCAST_FILE, caption="🎙 <b>Итоги дня</b>", parse_mode='html', voice_note=True)
+        
+        # Удаляем, но файл лежал в правильном месте, так что ошибки не будет
+        if os.path.exists(PODCAST_FILE): os.remove(PODCAST_FILE)
     except Exception as e:
         print(f"❌ Ошибка подкаста: {e}")
 
@@ -298,20 +314,22 @@ async def handler(event):
     except Exception as e:
         print(f"Ошибка отправки: {e}")
     finally:
+        # Удаляем картинку (она тоже лежит в BASE_DIR, так что путь правильный)
         if path_to_image and os.path.exists(path_to_image):
             os.remove(path_to_image)
 
 if __name__ == '__main__':
     print("🚀 Старт...")
-    # Создаем папку data, если её нет (на всякий случай)
+    # Создаем папку data (для локальных тестов, на сервере она уже есть)
     if not os.path.exists('/data'):
         try: os.makedirs('/data', exist_ok=True)
         except: pass
 
-    client.start()
-    scheduler = AsyncIOScheduler(event_loop=client.loop)
-    scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
-    scheduler.start()
-    print("🤖 Бот запущен! (StringSession Mode)")
-    client.run_until_disconnected()
+    if client:
+        client.start()
+        scheduler = AsyncIOScheduler(event_loop=client.loop)
+        scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
+        scheduler.start()
+        print("🤖 Бот запущен! (Clean Persistence Mode)")
+        client.run_until_disconnected()
     client.run_until_disconnected()
