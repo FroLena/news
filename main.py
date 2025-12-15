@@ -70,7 +70,7 @@ def save_to_history(text_essence):
             json.dump(history, f, ensure_ascii=False, indent=4)
     except: pass
 
-# --- GPT ЗАПРОС ---
+# --- GPT ЗАПРОС (ИСПРАВЛЕНО: ЛОГИРОВАНИЕ ОШИБОК) ---
 async def ask_gpt_direct(system_prompt, user_text):
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
@@ -83,21 +83,29 @@ async def ask_gpt_direct(system_prompt, user_text):
         "model": AI_MODEL,
         "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_text}]
     }
-    for _ in range(3):
+    
+    last_error = None
+    for i in range(3):
         async with httpx.AsyncClient(timeout=60.0) as http_client:
             try:
                 response = await http_client.post(url, headers=headers, json=payload)
                 if response.status_code == 200:
                     return response.json()['choices'][0]['message']['content']
-            except: pass
+                else:
+                    print(f"⚠️ GPT Ошибка {response.status_code}: {response.text}")
+            except Exception as e:
+                last_error = e
+                print(f"⚠️ GPT Connection Error (попытка {i+1}): {e}")
             await asyncio.sleep(5)
+            
+    print(f"❌ GPT не ответил после 3 попыток. Последняя ошибка: {last_error}")
     return None
 
-# --- ГЕНЕРАЦИЯ КАРТИНКИ (ТОЛЬКО ТУТ ИЗМЕНЕНИЯ - УБИРАЕМ ЗЕРНО) ---
+# --- ГЕНЕРАЦИЯ КАРТИНКИ ---
 async def generate_image(prompt_text):
     clean_prompt = prompt_text.replace('|||', '').replace('=== ПРОМПТ ===', '').strip()
     
-    # Жесткий суффикс для резкости (как мы договорились)
+    # Жесткий суффикс для резкости
     tech_suffix = " . Shot on Phase One XF IQ4, 150MP, ISO 100, f/8, crystal clear, sharp focus, professional stock photography, no grain, no blur, bright lighting."
     final_prompt = clean_prompt + tech_suffix
     
@@ -106,7 +114,7 @@ async def generate_image(prompt_text):
     seed = random.randint(1, 1000000)
     filename = os.path.join(BASE_DIR, f"image_{seed}.jpg")
     
-    # Модель flux (без realism) для цифровой четкости
+    # Модель flux
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&model=flux&seed={seed}&nologo=true"
     
     for _ in range(3):
@@ -120,7 +128,7 @@ async def generate_image(prompt_text):
             await asyncio.sleep(2)
     return None
 
-# --- ПОДКАСТ (ВЕРНУЛ СТАРЫЙ ПРОМПТ) ---
+# --- ПОДКАСТ ---
 async def send_evening_podcast():
     print("🎙 Готовлю подкаст...")
     try:
@@ -131,7 +139,6 @@ async def send_evening_podcast():
         if not history_posts: return
         full_text = "\n\n".join(history_posts[:20])
 
-        # Вернул полный промпт, как ты просил
         system_prompt = (
             "Ты — профессиональный радиоведущий итогового шоу «Сухой остаток».\n"
             "Твоя задача: Создать увлекательный сценарий на основе предоставленных новостей за день.\n\n"
@@ -156,7 +163,7 @@ async def send_evening_podcast():
     except Exception as e:
         print(f"❌ Ошибка подкаста: {e}")
 
-# --- AI РЕДАКТОР (ВЕРНУЛ СТАРЫЙ ТЕКСТ + НОВЫЙ БЛОК КАРТИНОК) ---
+# --- AI РЕДАКТОР ---
 async def rewrite_news(text):
     history_items = load_history()
     recent_history = history_items[-25:]
@@ -213,6 +220,10 @@ async def rewrite_news(text):
 
 @client.on(events.NewMessage(chats=SOURCE_CHANNELS))
 async def handler(event):
+    # Инициализируем переменные в начале, чтобы finally не упал
+    path_to_image = None
+    path_to_video = None
+    
     text = event.message.message
     if not text or len(text) < 20: return
 
@@ -221,7 +232,6 @@ async def handler(event):
     raw_text_cache.append(short_hash)
     if len(raw_text_cache) > 100: raw_text_cache.pop(0)
 
-    # [STAT] Уникальная новость поступила в обработку
     stats_db.increment('scanned')
 
     try:
@@ -229,12 +239,11 @@ async def handler(event):
         print(f"🔎 Обработка новости из: {chat.title}")
     except: pass
     
-    # ИЗМЕНЕНИЕ 1: Передаем больше истории, чтобы лучше ловить дубли
-    # В функции rewrite_news тоже нужно поменять recent_history = history_items[-15:] на [-25:]
     full_response = await rewrite_news(text)
     
     if not full_response:
         stats_db.increment('rejected_other')
+        print("❌ GPT вернул пустоту (см. ошибки выше)")
         return
 
     if "DUPLICATE" in full_response: 
@@ -281,7 +290,6 @@ async def handler(event):
         base_prompt = news_text.replace('\n', ' ')[:200]
         image_prompt = f"Commercial photo of {base_prompt}. Bright light, 8k sharp."
 
-    path_to_image = None
     sent_msg = None
     try:
         has_video = event.message.video is not None
@@ -289,9 +297,9 @@ async def handler(event):
             if event.message.file.size > MAX_VIDEO_SIZE:
                 sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
             else:
-                path = await event.download_media()
-                sent_msg = await client.send_file(DESTINATION, path, caption=news_text, parse_mode='html')
-                os.remove(path)
+                path_to_video = await event.download_media() # Сохраняем путь к видео
+                sent_msg = await client.send_file(DESTINATION, path_to_video, caption=news_text, parse_mode='html')
+                
         elif image_prompt:
             path_to_image = await generate_image(image_prompt)
             if path_to_image and os.path.exists(path_to_image):
@@ -301,7 +309,6 @@ async def handler(event):
         else:
             sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
 
-        # [STAT] Успешная публикация + Логирование ID
         if sent_msg:
             stats_db.increment('published')
             print(f"✅ Пост опубликован! ID: {sent_msg.id} | Канал: {DESTINATION}")
@@ -312,7 +319,6 @@ async def handler(event):
                 except: pass
             save_to_history(essence)
             
-            # Реакции и опросы только если сообщение реально ушло
             if reaction:
                 await asyncio.sleep(2)
                 try:
@@ -341,8 +347,13 @@ async def handler(event):
         print(f"❌ Критическая ошибка отправки: {e}")
         stats_db.increment('rejected_other')
     finally:
+        # Безопасное удаление всех временных файлов
         if path_to_image and os.path.exists(path_to_image):
-            os.remove(path_to_image)
+            try: os.remove(path_to_image)
+            except: pass
+        if path_to_video and os.path.exists(path_to_video):
+            try: os.remove(path_to_video)
+            except: pass
 
 if __name__ == '__main__':
     print("🚀 Старт...")
@@ -352,14 +363,9 @@ if __name__ == '__main__':
 
     if client:
         client.start()
-        
-        # Шедулер для подкаста (оставляем как было)
         scheduler = AsyncIOScheduler(event_loop=client.loop)
         scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
         scheduler.start()
-        
-        # Шедулер для статистики (новый модуль)
         start_scheduler(client)
-        
-        print("🤖 Бот запущен! (DIGITAL SHARPNESS + STATS ENABLED)")
+        print("🤖 Бот запущен! (CLEAN CODE + DEBUG MODE)")
         client.run_until_disconnected()
