@@ -21,8 +21,8 @@ SOURCE_CHANNELS = [
 ]
 DESTINATION = '@s_ostatok'
 
-# --- ГЛАВНАЯ НАСТРОЙКА ПУТЕЙ (FIX PERSISTENCE) ---
-# Определяем, где мы находимся.
+# --- НАСТРОЙКА ПУТЕЙ (Fix Persistence) ---
+# Если мы на сервере, пишем всё в /data. Если локально — в текущую папку.
 if os.path.exists('/data'):
     print("🖥 СРЕДА: СЕРВЕР (Amvera). Все файлы пишу в /data")
     BASE_DIR = '/data'
@@ -30,7 +30,6 @@ else:
     print("💻 СРЕДА: ЛОКАЛЬНАЯ. Пишу файлы рядом со скриптом")
     BASE_DIR = '.'
 
-# Формируем пути ко всем файлам через BASE_DIR
 HISTORY_FILE = os.path.join(BASE_DIR, 'history.json')
 PODCAST_FILE = os.path.join(BASE_DIR, 'podcast.mp3')
 
@@ -40,8 +39,7 @@ AI_MODEL = "openai/gpt-4o-mini"
 # 2. Инициализация клиента (StringSession)
 if not SESSION_STRING:
     print("❌ ОШИБКА: Не найдена переменная TG_SESSION_STR!")
-    # Если переменной нет, скрипт упадет, но это лучше, чем бесконечные рестарты
-    # В реальной ситуации тут можно добавить fallback на локальный файл, но для продакшена лучше так.
+    exit(1)
 
 try:
     client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -117,9 +115,10 @@ async def generate_image(prompt_text):
     import random
     seed = random.randint(1, 1000000)
     
-    # ВАЖНО: Путь к картинке тоже через BASE_DIR (/data/image_...)
+    # Файл сохраняем в правильную папку BASE_DIR
     filename = os.path.join(BASE_DIR, f"image_{seed}.jpg")
     
+    # Используем модель flux-realism без логотипа
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&model=flux-realism&seed={seed}&nologo=true"
     headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -156,17 +155,14 @@ async def send_evening_podcast():
         script = script.replace('*', '').replace('#', '')
         communicate = edge_tts.Communicate(script, "ru-RU-DmitryNeural")
         
-        # Сохраняем в /data/podcast.mp3
         await communicate.save(PODCAST_FILE)
-        
         await client.send_file(DESTINATION, PODCAST_FILE, caption="🎙 <b>Итоги дня</b>", parse_mode='html', voice_note=True)
         
-        # Удаляем, но файл лежал в правильном месте, так что ошибки не будет
         if os.path.exists(PODCAST_FILE): os.remove(PODCAST_FILE)
     except Exception as e:
         print(f"❌ Ошибка подкаста: {e}")
 
-# --- AI РЕДАКТОР ---
+# --- AI РЕДАКТОР (С ОБНОВЛЕННЫМ СТИЛЕМ IMAX) ---
 async def rewrite_news(text):
     history_items = load_history()
     recent_history = history_items[-15:]
@@ -180,12 +176,13 @@ async def rewrite_news(text):
         f"2. ДУБЛИ -> ВЕРНИ: DUPLICATE (Если событие уже было в списке выше).\n\n"
         f"ЧАСТЬ 2. ПРАВИЛА ТЕКСТА (Русский, HTML):\n"
         f"- Используй <b>жирный</b>. Markdown (**) НЕЛЬЗЯ.\n"
-        f"- Инфостиль.\n"
-        f"- Структура: Реакция -> Заголовок -> Текст -> Суть -> Опрос.\n\n"
-        f"ЧАСТЬ 3. ПРАВИЛА КАРТИНКИ (English, Visual Safety):\n"
-        f"- Описывай ФИЗИЧЕСКИЕ ОБЪЕКТЫ (люди, здания, машины).\n"
-        f"- ЗАПРЕТ НА АБСТРАКЦИИ.\n"
-        f"- КРИМИНАЛ: Не рисуй насилие. Рисуй 'Police car lights, building exterior'.\n\n"
+        f"- Инфостиль. Структура: Реакция -> Заголовок -> Текст -> Суть -> Опрос.\n\n"
+        f"ЧАСТЬ 3. ПРАВИЛА КАРТИНКИ (English, IMAX Quality):\n"
+        f"- Твоя задача: Описать сцену как дорогую документальную фотографию высокого разрешения.\n"
+        f"- Описывай ТОЛЬКО физические объекты, время суток, погоду.\n"
+        f"- ЗАПРЕТ НА СЛОВА: 'grain', 'film grain', 'cinematic lighting', 'dramatic', 'blur'.\n"
+        f"- ВМЕСТО ЭТОГО ПИШИ: 'Sharp focus', 'Natural daylight', 'Highly detailed', 'Realistic textures'.\n"
+        f"- КРИМИНАЛ: Рисуй 'Police tape, emergency vehicle lights, building exterior'. Без насилия.\n\n"
         f"=== ШАБЛОН ОТВЕТА ===\n"
         f"||R:🔥|| <b>Заголовок</b>\n"
         f"\n"
@@ -196,7 +193,7 @@ async def rewrite_news(text):
         f"Вариант 1\n"
         f"Вариант 2\n"
         f"|||\n"
-        f"Documentary photo description..."
+        f"A detailed documentary photograph shot on IMAX camera: [Описание сцены]. Natural daylight, sharp focus, highly detailed textures, realistic colors, 8k resolution."
     )
     return await ask_gpt_direct(system_prompt, text)
 
@@ -257,8 +254,9 @@ async def handler(event):
         except: pass
 
     if not image_prompt and event.message.photo:
+        # Обновил авто-промпт под новый стиль
         base_prompt = news_text.replace('\n', ' ')[:200]
-        image_prompt = f"Documentary photograph: {base_prompt}. Realistic film grain, 4k journalism."
+        image_prompt = f"A detailed documentary photograph shot on IMAX camera: {base_prompt}. Natural daylight, sharp focus, highly detailed textures, realistic colors, 8k resolution."
 
     path_to_image = None
     sent_msg = None
@@ -314,13 +312,11 @@ async def handler(event):
     except Exception as e:
         print(f"Ошибка отправки: {e}")
     finally:
-        # Удаляем картинку (она тоже лежит в BASE_DIR, так что путь правильный)
         if path_to_image and os.path.exists(path_to_image):
             os.remove(path_to_image)
 
 if __name__ == '__main__':
     print("🚀 Старт...")
-    # Создаем папку data (для локальных тестов, на сервере она уже есть)
     if not os.path.exists('/data'):
         try: os.makedirs('/data', exist_ok=True)
         except: pass
@@ -330,6 +326,5 @@ if __name__ == '__main__':
         scheduler = AsyncIOScheduler(event_loop=client.loop)
         scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
         scheduler.start()
-        print("🤖 Бот запущен! (Clean Persistence Mode)")
+        print("🤖 Бот запущен! (IMAX Visual Style)")
         client.run_until_disconnected()
-    client.run_until_disconnected()
