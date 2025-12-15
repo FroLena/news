@@ -62,17 +62,14 @@ async def ask_gpt_direct(system_prompt, user_text):
 
 # --- ГЕНЕРАЦИЯ КАРТИНКИ ---
 async def generate_image(prompt_text):
-    # Чистим от возможных остатков разметки
     clean_prompt = prompt_text.replace('|||', '').strip()
-    # Убираем технические заголовки, если ИИ вдруг их оставил
-    clean_prompt = clean_prompt.replace('=== ПРОМПТ ДЛЯ КАРТИНКИ (English) ===', '').strip()
+    clean_prompt = clean_prompt.replace('=== ЧАСТЬ 2: ГЕНЕРАЦИЯ ПРОМПТА ===', '').strip()
     
     print(f"🎨 Рисую (Flux): {clean_prompt[:60]}...")
     
     encoded_prompt = urllib.parse.quote(clean_prompt)
     import random
     seed = random.randint(1, 1000000)
-    # Используем Flux Realism для лучшего качества
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&model=flux-realism&seed={seed}&nologo=true"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
 
@@ -124,34 +121,33 @@ async def send_evening_podcast():
     except Exception as e:
         print(f"❌ Ошибка подкаста: {e}")
 
-# --- AI РЕДАКТОР (НОВЫЙ ЖЕСТКИЙ ВИЗУАЛЬНЫЙ ПРОМПТ) ---
+# --- AI РЕДАКТОР (FIX STRUCTURE) ---
 async def rewrite_news(text, history_topics):
     history_str = "\n".join([f"- {t}" for t in history_topics[-15:]]) if history_topics else "Нет истории."
 
     system_prompt = (
         f"Ты — главный редактор канала 'Сухой остаток'.\n"
         f"ИСТОРИЯ: {history_str}\n\n"
-        f"=== ЧАСТЬ 1: РАБОТА С ТЕКСТОМ ===\n"
+        f"ИНСТРУКЦИЯ:\n"
         f"1. 🚨 РЕКЛАМА -> ВЕРНИ: SKIP (Если есть 'Реклама', 'erid', продажа).\n"
         f"2. 🔄 ДУБЛИ -> ВЕРНИ: DUPLICATE (Если событие уже было).\n"
-        f"3. ✍️ РЕРАЙТ (Русский язык):\n"
-        f"   - Инфостиль, без воды, без 'мы'/'нам'.\n"
-        f"   - Заголовок: Жирный, яркий. Цитаты: в косвенную речь.\n"
-        f"   - Структура: Реакция -> Заголовок -> Текст -> Суть -> Опрос (если нужен).\n"
-        f"   - Реакции: ||R:🔥|| (срочно), ||R:🤡|| (смешно), ||R:😢|| (грустно), ||R:⚡️|| (шок), ||R:👍|| (позитив).\n\n"
-        f"=== ЧАСТЬ 2: ГЕНЕРАЦИЯ ПРОМПТА ДЛЯ КАРТИНКИ (English) ===\n"
-        f"Твоя задача — превратить текст новости в визуальную сцену.\n"
-        f"1. АНАЛИЗ: Выдели главные визуальные объекты (кто? где? что делают?).\n"
-        f"2. ПЕРЕВОД: Опиши эту сцену на английском языке для генератора картинок.\n"
-        f"3. ПРАВИЛА ОПИСАНИЯ:\n"
-        f"   - ТОЛЬКО физические объекты. Никаких абстракций ('политические разногласия', 'кризис'). Если новость про политику — рисуй здание парламента или политика за трибуной. Если про панд — рисуй панд в зоопарке.\n"
-        f"   - Детализируй: время суток, погода, освещение, эмоции людей на фото.\n"
-        f"4. СТИЛЬ (Добавляй в конец каждого промпта):\n"
-        f"   '... Documentary photograph, highly detailed, realistic film grain, cinematic lighting, shot on Canon 5D, 4k journalism.'\n\n"
-        f"ФОРМАТ ВЫВОДА (СТРОГО):\n"
-        f"[Текст новости с разметкой]\n"
+        f"3. ✍️ ТЕКСТ (HTML, Русский):\n"
+        f"   - Используй тег <b>для жирного</b>. НЕ используй Markdown (**).\n"
+        f"   - Инфостиль. Без воды.\n"
+        f"   - Реакции на выбор: ||R:🔥||, ||R:🤡||, ||R:😢||, ||R:⚡️||, ||R:👍||.\n"
+        f"4. 🎨 КАРТИНКА (English):\n"
+        f"   - Опиши физические объекты (кто, где, что делают). Никаких абстракций.\n\n"
+        f"=== ШАБЛОН ОТВЕТА (СТРОГО СОБЛЮДАЙ ЭТУ СТРУКТУРУ) ===\n"
+        f"||R:🔥|| <b>Заголовок новости</b>\n"
+        f"(Пустая строка)\n"
+        f"Текст новости одним или двумя абзацами.\n"
+        f"<blockquote><b>📌 Суть:</b> Короткий вывод.</blockquote>\n"
+        f"||POLL||\n"
+        f"Вопрос для опроса?\n"
+        f"Вариант ответа 1\n"
+        f"Вариант ответа 2\n"
         f"|||\n"
-        f"[Твой подробный промпт на английском]"
+        f"Documentary photo description: A teacher in a classroom looking concerned, students in background, realistic lighting, 4k journalism style."
     )
 
     return await ask_gpt_direct(system_prompt, text)
@@ -189,18 +185,15 @@ async def handler(event):
     raw_text = full_response
     image_prompt = None
     
+    # Разделяем текст и картинку
     if "|||" in full_response:
         parts = full_response.split("|||")
         news_text = parts[0].strip()
-        if len(parts) > 1 and parts[1].strip():
-            image_prompt = parts[1].strip()
+        if len(parts) > 1: image_prompt = parts[1].strip()
     else:
-        # Если разделителя нет, считаем всё текстом и не генерируем картинку
         news_text = full_response.strip()
 
-    # Чистка от возможных технических заголовков, если они все же просочились
-    news_text = news_text.replace("=== ЧАСТЬ 1: РАБОТА С ТЕКСТОМ ===", "").strip()
-
+    # Парсинг реакции
     reaction = None
     if "||R:" in news_text:
         try:
@@ -211,22 +204,30 @@ async def handler(event):
             print(f"😎 Реакция: {reaction}")
         except: pass
 
+    # Парсинг опроса (ВАЖНО: Ищем тег ||POLL||)
     poll_data = None
     if "||POLL||" in news_text:
         try:
-            p = news_text.split("||POLL||")
-            news_text = p[0].strip()
-            raw_poll = p[1].strip().split('\n')
-            poll_lines = [line.strip() for line in raw_poll if line.strip()]
-            if len(poll_lines) >= 3:
-                poll_data = {"q": poll_lines[0], "o": poll_lines[1:]}
-        except: pass
+            parts = news_text.split("||POLL||")
+            news_text = parts[0].strip() # Текст новости заканчивается ДО тега
+            
+            # Разбираем строки опроса
+            poll_raw = parts[1].strip().split('\n')
+            poll_lines = [line.strip() for line in poll_raw if line.strip()]
+            
+            if len(poll_lines) >= 3: # Вопрос + минимум 2 ответа
+                poll_data = {
+                    "q": poll_lines[0], 
+                    "o": poll_lines[1:]
+                }
+        except Exception as e:
+            print(f"⚠️ Ошибка парсинга опроса: {e}")
 
-    # Fallback: если ИИ не дал промпт, но в оригинале было фото - пробуем авто-промпт
+    # Авто-промпт, если ИИ не дал своего
     if not image_prompt and event.message.photo:
-        print("⚠️ ИИ не дал промпт, генерирую авто-промпт по контексту...")
+        print("⚠️ Генерирую авто-промпт...")
         base_prompt = news_text.replace('\n', ' ')[:200]
-        image_prompt = f"Documentary photograph capturing the scene described: {base_prompt}. Realistic film grain, cinematic lighting, 4k journalism."
+        image_prompt = f"Documentary photograph: {base_prompt}. Realistic film grain, 4k journalism."
 
     # --- ОТПРАВКА ---
     path_to_image = None
@@ -247,11 +248,11 @@ async def handler(event):
             if path_to_image and os.path.exists(path_to_image):
                 sent_msg = await client.send_file(DESTINATION, path_to_image, caption=news_text, parse_mode='html')
             else:
-                # Если картинка не сгенерировалась, шлем просто текст
                 sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
         else:
             sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
 
+        # Ставим реакцию
         if sent_msg and reaction:
             await asyncio.sleep(2)
             try:
@@ -262,18 +263,21 @@ async def handler(event):
                 ))
             except: pass
 
+        # Отправляем опрос ОТДЕЛЬНЫМ сообщением (или как медиа, если получится)
         if poll_data:
             await asyncio.sleep(1)
             try:
-                poll_media = types.InputMediaPoll(
+                # Отправляем опрос как отдельное сообщение, чтобы не смешивать с картинкой/текстом
+                await client.send_message(DESTINATION, file=types.InputMediaPoll(
                     poll=types.Poll(
-                        id=1, 
-                        question=poll_data["q"], 
+                        id=1,
+                        question=poll_data["q"],
                         answers=[types.PollAnswer(text=o, option=bytes([i])) for i, o in enumerate(poll_data["o"])]
                     )
-                )
-                await client.send_message(DESTINATION, file=poll_media)
-            except: pass
+                ))
+                print("✅ Опрос отправлен")
+            except Exception as e:
+                print(f"⚠️ Не удалось отправить опрос: {e}")
 
         print("✅ Пост готов!")
         
@@ -297,5 +301,5 @@ if __name__ == '__main__':
     scheduler = AsyncIOScheduler(event_loop=client.loop)
     scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
     scheduler.start()
-    print("🤖 Бот запущен! (Visual Director Mode)")
+    print("🤖 Бот запущен! (Template Fix)")
     client.run_until_disconnected()
