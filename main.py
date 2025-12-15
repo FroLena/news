@@ -6,6 +6,7 @@ import urllib.parse
 from telethon import TelegramClient, events, types, functions
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import edge_tts
+import re
 
 # 1. Настройки
 API_ID = int(os.environ.get('TG_API_ID'))
@@ -26,9 +27,9 @@ AI_MODEL = "openai/gpt-4o-mini"
 # 2. Клиент Телеграм
 client = TelegramClient('amvera_session', API_ID, API_HASH)
 raw_text_cache = []
-published_topics = []
+published_topics = [] # Сюда будем писать СУТЬ событий
 
-# --- ПРЯМОЙ ЗАПРОС К GPT (БЕЗ БИБЛИОТЕКИ) ---
+# --- ПРЯМОЙ ЗАПРОС К GPT ---
 async def ask_gpt_direct(system_prompt, user_text):
     url = "https://openrouter.ai/api/v1/chat/completions"
     
@@ -51,21 +52,15 @@ async def ask_gpt_direct(system_prompt, user_text):
         async with httpx.AsyncClient(timeout=60.0) as http_client:
             try:
                 response = await http_client.post(url, headers=headers, json=payload)
-                
                 if response.status_code == 200:
                     data = response.json()
                     return data['choices'][0]['message']['content']
                 else:
-                    print(f"⚠️ OpenAI Error ({response.status_code}): {response.text[:100]}")
-            
-            except httpx.ConnectError:
-                print(f"⚠️ Ошибка соединения с OpenRouter (Попытка {attempt+1})...")
-            except Exception as e:
-                print(f"⚠️ Ошибка запроса GPT: {e}")
-            
+                    print(f"⚠️ OpenAI Error ({response.status_code})")
+            except: pass
             await asyncio.sleep(5)
             
-    print("❌ Не удалось получить ответ от GPT после 3 попыток.")
+    print("❌ Не удалось получить ответ от GPT.")
     return None
 
 # --- ГЕНЕРАЦИЯ КАРТИНКИ (Pollinations) ---
@@ -108,7 +103,7 @@ async def send_evening_podcast():
             "Твоя задача: Создать увлекательный сценарий на основе предоставленных новостей за день.\n\n"
             "ТРЕБОВАНИЯ К ТЕКСТУ:\n"
             "1. СТРУКТУРА: Вступление -> Плавный рассказ (3-5 главных тем) -> Заключение.\n"
-            "2. СТИЛЬ: Живой, разговорный, немного ироничный, но уверенный. Избегай сухих перечислений.\n"
+            "2. СТИЛЬ: Живой, разговорный, немного ироничный, но уверенный.\n"
             "3. АДАПТАЦИЯ ПОД ОЗВУЧКУ: Не используй сложные цифры, убери ссылки и спецсимволы.\n"
             "4. ХРОНОМЕТРАЖ: 60-90 секунд.\n\n"
             "НАЧАЛО: 'Добрый вечер. В эфире Сухой остаток. Подведем итоги этого дня.'\n"
@@ -116,7 +111,6 @@ async def send_evening_podcast():
         )
         
         script = await ask_gpt_direct(system_prompt, full_text)
-        
         if not script: return
 
         script = script.replace('*', '').replace('#', '')
@@ -128,32 +122,30 @@ async def send_evening_podcast():
     except Exception as e:
         print(f"❌ Ошибка подкаста: {e}")
 
-# --- AI РЕДАКТОР (ИСПРАВЛЕННЫЙ) ---
+# --- AI РЕДАКТОР (УСИЛЕННЫЙ) ---
 async def rewrite_news(text, history_topics):
-    recent_history = history_topics[-5:] if len(history_topics) > 0 else []
-    history_str = "\n".join([f"- {t}" for t in recent_history]) if recent_history else "Нет истории."
+    # Формируем историю как список конкретных событий
+    history_str = "\n".join([f"- {t}" for t in history_topics[-10:]]) if history_topics else "Нет истории."
 
     system_prompt = (
-        f"Ты — редактор новостного канала. История: {history_str}\n\n"
+        f"Ты — главный редактор новостного канала. Твоя задача — жесткий отбор и рерайт.\n\n"
+        f"ИСТОРИЯ ПОСЛЕДНИХ СОБЫТИЙ КАНАЛА:\n{history_str}\n\n"
         f"ФОРМАТ ОТВЕТА СТРОГО: ТЕКСТ ||| ПРОМПТ_КАРТИНКИ\n\n"
-        f"=== ЧАСТЬ 1: ТЕКСТ (Russian HTML) ===\n"
-        f"1. ЗАДАЧА: Полностью перепиши новость своим языком. НЕ копируй исходный текст! Сделай его короче и информативнее (Инфостиль).\n"
-        f"2. ФАКТЫ: Используй факты из источника, но пиши своими словами. Не придумывай лишнего.\n"
-        f"3. ФИЛЬТРЫ: Реклама/Продажи/Казино -> верни слово SKIP. Дубликаты -> верни DUPLICATE.\n"
-        f"4. СТРУКТУРА:\n"
-        f"   - Придумай короткий заголовок (3-6 слов) и выдели жирным: <b>Твой заголовок</b>. (НЕ пиши слово 'Заголовок', пиши само название).\n"
-        f"   - (Перенос строки)\n"
-        f"   - Основной текст новости (2-3 предложения).\n"
-        f"   - В конце: <blockquote><b>📌 Суть:</b> [Вывод одним предложением]</blockquote>\n"
-        f"5. РЕАКЦИИ: В начало текста добавь: ||R:🔥|| (или 🤡, ⚡️, 😢, 👍).\n"
-        f"6. ОПРОСЫ: Если новость резонансная, добавь в конец текста блок:\n"
-        f"   ||POLL||\n"
-        f"   Текст вопроса?\n"
-        f"   Вариант 1\n"
-        f"   Вариант 2\n\n"
+        f"=== ЧАСТЬ 1: ТЕКСТ (СТРОГО РУССКИЙ ЯЗЫК) ===\n"
+        f"1. ПРОВЕРКА НА ДУБЛИ (КРИТИЧНО): Если новость об том же событии, что и в ИСТОРИИ (даже с новыми мелкими деталями), верни ТОЛЬКО слово: DUPLICATE.\n"
+        f"2. ФИЛЬТР МУСОРА: Реклама, сборы денег, призывы подписаться -> верни слово SKIP.\n"
+        f"3. РЕРАЙТ: Перепиши новость полностью своим языком (Инфостиль). Используй только факты из текста.\n"
+        f"4. ЗАГОЛОВОК: Придумай заголовок на РУССКОМ языке (3-6 слов). Выдели жирным: <b>Заголовок</b>.\n"
+        f"5. СТРУКТУРА:\n"
+        f"   - ||R:🔥|| <b>Заголовок</b>\n"
+        f"   - (Пустая строка)\n"
+        f"   - Текст новости (2-3 предложения).\n"
+        f"   - В конце: <blockquote><b>📌 Суть:</b> [Короткий вывод]</blockquote>\n"
+        f"   - (Если нужно) ||POLL||\n\n"
         f"=== ЧАСТЬ 2: ПРОМПТ КАРТИНКИ (English) ===\n"
+        f"- Description for AI image generator.\n"
         f"- Style: 'Hyperrealistic documentary photo, award-winning journalism, cinematic lighting, 8k'.\n"
-        f"- NO TEXT on image.\n"
+        f"- NO TEXT on image."
     )
 
     return await ask_gpt_direct(system_prompt, text)
@@ -180,8 +172,12 @@ async def handler(event):
     full_response = await rewrite_news(text, published_topics)
     if not full_response: return
 
-    if "DUPLICATE" in full_response: return
-    if "SKIP" in full_response: return
+    if "DUPLICATE" in full_response: 
+        print(f"❌ Отсечен дубль (уже было в истории)")
+        return
+    if "SKIP" in full_response: 
+        print(f"🗑 Реклама/Мусор")
+        return
 
     # --- ПАРСИНГ ---
     raw_text = full_response
@@ -191,7 +187,6 @@ async def handler(event):
         parts = raw_text.split("|||")
         news_text = parts[0].strip()
         image_prompt = parts[1].strip()
-        print("✅ Промпт для картинки найден!")
     else:
         news_text = raw_text.strip()
 
@@ -214,11 +209,10 @@ async def handler(event):
             poll_lines = [line.strip() for line in raw_poll if line.strip()]
             if len(poll_lines) >= 3:
                 poll_data = {"q": poll_lines[0], "o": poll_lines[1:]}
-                print(f"📊 Опрос: {poll_data['q']}")
         except: pass
 
+    # Fallback (авто-промпт)
     if not image_prompt and event.message.photo:
-        print("⚠️ Генерирую авто-промпт...")
         base_prompt = news_text.replace('\n', ' ')[:150]
         image_prompt = f"Hyperrealistic documentary photo, award-winning journalism, cinematic lighting, 8k. Context: {base_prompt}"
 
@@ -269,7 +263,16 @@ async def handler(event):
             except: pass
 
         print("✅ Пост готов!")
-        published_topics.append(news_text[:100])
+        
+        # --- ВАЖНО: СОХРАНЯЕМ В ИСТОРИЮ ТОЛЬКО СУТЬ ---
+        # Ищем блок "Суть:", чтобы в историю попало чистое описание события, а не HTML-теги
+        essence = news_text
+        if "📌 Суть:" in news_text:
+            try:
+                essence = news_text.split("📌 Суть:")[1].replace("</blockquote>", "").strip()
+            except: pass
+        
+        published_topics.append(essence[:200]) # Сохраняем до 200 символов сути
         if len(published_topics) > 10: published_topics.pop(0)
 
     except Exception as e:
@@ -284,5 +287,5 @@ if __name__ == '__main__':
     scheduler = AsyncIOScheduler(event_loop=client.loop)
     scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
     scheduler.start()
-    print("🤖 Бот запущен! (Рерайт + Прямые запросы)")
+    print("🤖 Бот запущен! (Smart Deduplication)")
     client.run_until_disconnected()
