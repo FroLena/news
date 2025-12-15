@@ -25,7 +25,8 @@ MAX_VIDEO_SIZE = 50 * 1024 * 1024
 print("Использую OpenRouter...")
 gpt_client = OpenAI(
     api_key=OPENAI_KEY, 
-    base_url="https://openrouter.ai/api/v1"
+    base_url="https://openrouter.ai/api/v1",
+    timeout=60.0 # <-- ДАЕМ БОЛЬШЕ ВРЕМЕНИ НА ОТВЕТ (глобально)
 )
 AI_MODEL = "openai/gpt-4o-mini"
 
@@ -34,7 +35,7 @@ client = TelegramClient('amvera_session', API_ID, API_HASH)
 raw_text_cache = []
 published_topics = []
 
-# --- ГЕНЕРАЦИЯ КАРТИНКИ (Pollinations + FIX TIMEOUT) ---
+# --- ГЕНЕРАЦИЯ КАРТИНКИ (Pollinations + Retry) ---
 async def generate_image(prompt_text):
     clean_prompt = prompt_text.replace('||', '').replace('R:', '').strip()
     print(f"🎨 Рисую (Flux): {clean_prompt[:50]}...")
@@ -42,30 +43,28 @@ async def generate_image(prompt_text):
     encoded_prompt = urllib.parse.quote(clean_prompt)
     import random
     seed = random.randint(1, 1000000)
-    
-    # URL для генерации
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&model=flux&seed={seed}&nologo=true"
-    
-    # Маскируемся под браузер Chrome
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
 
-    # Увеличили тайм-аут до 60 секунд!
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as http_client:
-        try:
-            response = await http_client.get(url, headers=headers)
-            if response.status_code == 200:
-                filename = f"image_{seed}.jpg"
-                with open(filename, "wb") as f:
-                    f.write(response.content)
-                return filename
-            else:
-                print(f"⚠️ Ошибка генерации ({response.status_code})")
-                return None
-        except Exception as e:
-            print(f"⚠️ Ошибка сети при скачивании: {e}")
-            return None
+    # Попытки скачать картинку
+    for attempt in range(3):
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as http_client:
+            try:
+                response = await http_client.get(url, headers=headers)
+                if response.status_code == 200:
+                    filename = f"image_{seed}.jpg"
+                    with open(filename, "wb") as f:
+                        f.write(response.content)
+                    return filename
+                else:
+                    print(f"⚠️ Попытка {attempt+1}: Ошибка генерации ({response.status_code})")
+            except Exception as e:
+                print(f"⚠️ Попытка {attempt+1}: Ошибка сети картинки: {e}")
+            
+            await asyncio.sleep(2) # Ждем перед повтором
+            
+    print("❌ Не удалось сгенерировать картинку после 3 попыток")
+    return None
 
 # --- ПОДКАСТ ---
 async def send_evening_podcast():
@@ -90,10 +89,23 @@ async def send_evening_podcast():
             "КОНЕЦ: 'Таким был этот день. Оставайтесь с нами. До связи.'"
         )
         
-        script = gpt_client.chat.completions.create(
-            model=AI_MODEL,
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": full_text}]
-        ).choices[0].message.content.replace('*', '').replace('#', '')
+        script = None
+        # Попытки генерации текста подкаста
+        for attempt in range(3):
+            try:
+                response = gpt_client.chat.completions.create(
+                    model=AI_MODEL,
+                    messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": full_text}]
+                )
+                script = response.choices[0].message.content.replace('*', '').replace('#', '')
+                break
+            except Exception as e:
+                print(f"⚠️ Попытка {attempt+1} (Подкаст): {e}")
+                await asyncio.sleep(2)
+
+        if not script:
+            print("❌ Не удалось создать сценарий подкаста")
+            return
 
         communicate = edge_tts.Communicate(script, "ru-RU-DmitryNeural")
         await communicate.save("podcast.mp3")
@@ -103,7 +115,7 @@ async def send_evening_podcast():
     except Exception as e:
         print(f"❌ Ошибка подкаста: {e}")
 
-# --- AI РЕДАКТОР ---
+# --- AI РЕДАКТОР (С RETRY LOGIC) ---
 async def rewrite_news(text, history_topics):
     recent_history = history_topics[-5:] if len(history_topics) > 0 else []
     history_str = "\n".join([f"- {t}" for t in recent_history]) if recent_history else "Нет истории."
@@ -130,15 +142,24 @@ async def rewrite_news(text, history_topics):
         f"- NO TEXT on image.\n"
     )
 
-    try:
-        response = gpt_client.chat.completions.create(
-            model=AI_MODEL,
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": text}]
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        print(f"Ошибка AI: {e}")
-        return None
+    # === ЦИКЛ ПОВТОРНЫХ ПОПЫТОК (RETRY) ===
+    for attempt in range(3):
+        try:
+            # Делаем запрос (тайм-аут 60 сек уже в настройках клиента)
+            response = gpt_client.chat.completions.create(
+                model=AI_MODEL,
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": text}]
+            )
+            return response.choices[0].message.content
+        
+        except Exception as e:
+            # Если ошибка соединения, пишем варнинг и ждем 3 секунды
+            print(f"⚠️ Попытка {attempt+1} провалилась: {e}")
+            await asyncio.sleep(3)
+    
+    # Если 3 раза не вышло
+    print("❌ AI Connection Error: Сдаюсь после 3 попыток.")
+    return None
 
 @client.on(events.NewMessage(chats=SOURCE_CHANNELS))
 async def handler(event):
@@ -192,21 +213,14 @@ async def handler(event):
         try:
             p = news_text.split("||POLL||")
             news_text = p[0].strip()
-            # Берем всё, что после тега, и делим на строки
             raw_poll = p[1].strip().split('\n')
-            # Фильтруем пустые строки
             poll_lines = [line.strip() for line in raw_poll if line.strip()]
-            
             if len(poll_lines) >= 3:
-                poll_data = {
-                    "q": poll_lines[0], # Первая строка - вопрос
-                    "o": poll_lines[1:] # Остальные - варианты
-                }
+                poll_data = {"q": poll_lines[0], "o": poll_lines[1:]}
                 print(f"📊 Опрос: {poll_data['q']}")
         except Exception as e:
             print(f"⚠️ Ошибка парсинга опроса: {e}")
 
-    # Fallback (авто-промпт)
     if not image_prompt and event.message.photo:
         print("⚠️ Генерирую авто-промпт...")
         base_prompt = news_text.replace('\n', ' ')[:150]
@@ -257,8 +271,7 @@ async def handler(event):
                 )
                 await client.send_message(DESTINATION, file=poll_media)
                 print("✅ Опрос отправлен!")
-            except Exception as e:
-                print(f"⚠️ Ошибка отправки опроса: {e}")
+            except: pass
 
         print("✅ Пост готов!")
         published_topics.append(news_text[:100])
@@ -276,5 +289,5 @@ if __name__ == '__main__':
     scheduler = AsyncIOScheduler(event_loop=client.loop)
     scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
     scheduler.start()
-    print("🤖 Бот запущен! (Timeout 60s)")
+    print("🤖 Бот запущен! (С защитой от сбоев сети)")
     client.run_until_disconnected()
