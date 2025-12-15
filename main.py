@@ -7,9 +7,11 @@ import time
 from telethon import TelegramClient, events, types, functions
 from telethon.sessions import StringSession
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import edge_tts
+
+# --- ИМПОРТЫ СТАТИСТИКИ ---
 from stats import stats_db
 from scheduler import start_scheduler
-import edge_tts
 
 # 1. Настройки
 API_ID = int(os.environ.get('TG_API_ID'))
@@ -167,14 +169,14 @@ async def rewrite_news(text):
         f"1. РЕКЛАМА -> ВЕРНИ: SKIP (Любые продажи, 'erid', 'партнерский материал').\n"
         f"2. ДУБЛИ -> ВЕРНИ: DUPLICATE (Если событие уже было в списке выше).\n\n"
         f"ЧАСТЬ 2. ПРАВИЛА ТЕКСТА (Русский, HTML):\n"
-        f"- Используй <b>жирный</b>. Markdown (**) НЕЛЬЗЯ.\n"
-        f"- Инфостиль. Структура: Реакция -> Заголовок -> Текст -> Суть -> Опрос.\n\n"
+        f" - Используй <b>жирный</b>. Markdown (**) НЕЛЬЗЯ.\n"
+        f" - Инфостиль. Структура: Реакция -> Заголовок -> Текст -> Суть -> Опрос.\n\n"
         f"ЧАСТЬ 3. ПРАВИЛА КАРТИНКИ (English, DIGITAL STOCK QUALITY):\n"
-        f"- Забудь про 'cinematic', 'film', 'atmosphere', 'grain'.\n"
-        f"- Твоя цель: Идеально четкое цифровое фото для фотостока.\n"
-        f"- Описывай объекты и СВЕТ (Bright natural light).\n"
-        f"- Используй слова: 'Sharp focus', '4k', 'Digital photography'.\n"
-        f"- КРИМИНАЛ: Только косвенные признаки (мигалки, ленты). Без насилия.\n\n"
+        f" - Забудь про 'cinematic', 'film', 'atmosphere', 'grain'.\n"
+        f" - Твоя цель: Идеально четкое цифровое фото для фотостока.\n"
+        f" - Описывай объекты и СВЕТ (Bright natural light).\n"
+        f" - Используй слова: 'Sharp focus', '4k', 'Digital photography'.\n"
+        f" - КРИМИНАЛ: Только косвенные признаки (мигалки, ленты). Без насилия.\n\n"
         f"=== ШАБЛОН ОТВЕТА (СТРОГО СОБЛЮДАЙ ЭТУ СТРУКТУРУ) ===\n"
         f"||R:🔥|| <b>Заголовок новости</b>\n"
         f"\n"
@@ -199,19 +201,30 @@ async def handler(event):
     raw_text_cache.append(short_hash)
     if len(raw_text_cache) > 100: raw_text_cache.pop(0)
 
+    # [STAT] Уникальная новость поступила в обработку
+    stats_db.increment('scanned')
+
     try:
         chat = await event.get_chat()
         print(f"🔎 Обработка новости из: {chat.title}")
     except: pass
     
     full_response = await rewrite_news(text)
-    if not full_response: return
+    
+    if not full_response:
+        # [STAT] Ошибка GPT или пустой ответ
+        stats_db.increment('rejected_other')
+        return
 
     if "DUPLICATE" in full_response: 
         print(f"❌ Отсечен дубль")
+        # [STAT] Отсеян дубль
+        stats_db.increment('rejected_dups')
         return
     if "SKIP" in full_response: 
         print(f"🗑 Отсечена реклама/мусор")
+        # [STAT] Отсеяна реклама
+        stats_db.increment('rejected_ads')
         return
 
     # --- ПАРСИНГ ---
@@ -270,6 +283,10 @@ async def handler(event):
         else:
             sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
 
+        # [STAT] Успешная публикация
+        if sent_msg:
+            stats_db.increment('published')
+
         if sent_msg and reaction:
             await asyncio.sleep(2)
             try:
@@ -303,6 +320,8 @@ async def handler(event):
 
     except Exception as e:
         print(f"Ошибка отправки: {e}")
+        # [STAT] Техническая ошибка при отправке
+        stats_db.increment('rejected_other')
     finally:
         if path_to_image and os.path.exists(path_to_image):
             os.remove(path_to_image)
@@ -315,11 +334,14 @@ if __name__ == '__main__':
 
     if client:
         client.start()
+        
+        # Шедулер для подкаста (оставляем как было)
         scheduler = AsyncIOScheduler(event_loop=client.loop)
         scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
         scheduler.start()
         
+        # Шедулер для статистики (новый модуль)
         start_scheduler(client)
         
-        print("🤖 Бот запущен! (DIGITAL SHARPNESS + OLD TEXT STYLE)")
+        print("🤖 Бот запущен! (DIGITAL SHARPNESS + STATS ENABLED)")
         client.run_until_disconnected()
