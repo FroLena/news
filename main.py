@@ -159,7 +159,7 @@ async def send_evening_podcast():
 # --- AI РЕДАКТОР (ВЕРНУЛ СТАРЫЙ ТЕКСТ + НОВЫЙ БЛОК КАРТИНОК) ---
 async def rewrite_news(text):
     history_items = load_history()
-    recent_history = history_items[-15:]
+    recent_history = history_items[-25:]
     history_str = "\n".join([f"- {item['text']}" for item in recent_history]) if recent_history else "История пуста."
 
     system_prompt = (
