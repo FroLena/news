@@ -19,18 +19,28 @@ SOURCE_CHANNELS = [
 ]
 DESTINATION = '@s_ostatok'
 
-# ВАЖНО: Все постоянные файлы сохраняем в папку /data
-HISTORY_FILE = '/data/history.json' 
-SESSION_PATH = '/data/amvera_session'
+# --- АВТОМАТИЧЕСКОЕ ОПРЕДЕЛЕНИЕ СРЕДЫ (ЗАЩИТА ОТ КОНФЛИКТОВ) ---
+# Если мы на сервере (есть папка /data), используем постоянное хранилище.
+# Если мы на ПК/в Google Shell, используем локальные файлы.
+if os.path.exists('/data'):
+    print("🖥 Обнаружена среда сервера (Amvera/Docker). Использую /data")
+    HISTORY_FILE = '/data/history.json'
+    # Имя сессии для ПРОДАКШЕНА (на сервере)
+    SESSION_PATH = '/data/amvera_prod' 
+else:
+    print("💻 Обнаружена локальная среда (PC/Google Shell). Использую локальные файлы")
+    HISTORY_FILE = 'history.json'
+    # Имя сессии для ТЕСТОВ (чтобы не убить боевую сессию)
+    SESSION_PATH = 'local_session_test' 
 
 MAX_VIDEO_SIZE = 50 * 1024 * 1024 
 AI_MODEL = "openai/gpt-4o-mini"
 
-# 2. Клиент Телеграм (Сессия тоже должна быть в /data)
+# 2. Клиент Телеграм
 client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 raw_text_cache = []
 
-# --- РАБОТА С ИСТОРИЕЙ (JSON в /data) ---
+# --- РАБОТА С ИСТОРИЕЙ (JSON) ---
 def load_history():
     if not os.path.exists(HISTORY_FILE):
         return []
@@ -50,10 +60,10 @@ def save_to_history(text_essence):
         'text': text_essence,
         'timestamp': time.time()
     })
-    if len(history) > 30:
-        history = history[-30:]
+    # Храним последние 50 записей
+    if len(history) > 50:
+        history = history[-50:]
     
-    # Сохраняем в постоянное хранилище
     with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
         json.dump(history, f, ensure_ascii=False, indent=4)
 
@@ -97,6 +107,7 @@ async def generate_image(prompt_text):
     encoded_prompt = urllib.parse.quote(clean_prompt)
     import random
     seed = random.randint(1, 1000000)
+    # Используем Flux-Realism
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&model=flux-realism&seed={seed}&nologo=true"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
 
@@ -144,13 +155,15 @@ async def send_evening_podcast():
 # --- AI РЕДАКТОР ---
 async def rewrite_news(text):
     history_items = load_history()
-    history_str = "\n".join([f"- {item['text']}" for item in history_items]) if history_items else "История пуста."
+    # Берем последние 15 заголовков для контекста
+    recent_history = history_items[-15:]
+    history_str = "\n".join([f"- {item['text']}" for item in recent_history]) if recent_history else "История пуста."
 
     system_prompt = (
         f"Ты — главный редактор канала 'Сухой остаток'.\n"
         f"СПИСОК ОПУБЛИКОВАННЫХ СОБЫТИЙ (ЗА 24 ЧАСА):\n{history_str}\n\n"
         f"ЧАСТЬ 1. ПРАВИЛА ФИЛЬТРАЦИИ:\n"
-        f"1. РЕКЛАМА -> ВЕРНИ: SKIP (Любые продажи, 'erid').\n"
+        f"1. РЕКЛАМА -> ВЕРНИ: SKIP (Любые продажи, 'erid', 'партнерский материал').\n"
         f"2. ДУБЛИ -> ВЕРНИ: DUPLICATE (Если событие уже было в списке выше).\n\n"
         f"ЧАСТЬ 2. ПРАВИЛА ТЕКСТА (Русский, HTML):\n"
         f"- Используй <b>жирный</b>. Markdown (**) НЕЛЬЗЯ.\n"
@@ -288,6 +301,7 @@ async def handler(event):
 
         print("✅ Пост готов!")
         
+        # Сохранение в историю (Суть)
         essence = news_text
         if "📌 Суть:" in news_text:
             try: 
@@ -304,15 +318,16 @@ async def handler(event):
 
 if __name__ == '__main__':
     print("🚀 Старт...")
-    # Создаем файл истории в /data, если нет
-    if not os.path.exists(HISTORY_FILE):
-        # Создаем папку data если её нет (обычно на хостинге она есть, но для локального теста пригодится)
-        os.makedirs('/data', exist_ok=True)
-        with open(HISTORY_FILE, 'w') as f: json.dump([], f)
-        
+    
+    # Инициализация папки данных для локального теста
+    if not os.path.exists('/data'):
+        try:
+            os.makedirs('/data', exist_ok=True)
+        except: pass
+
     client.start()
     scheduler = AsyncIOScheduler(event_loop=client.loop)
     scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
     scheduler.start()
-    print("🤖 Бот запущен! (Data Persistence Enabled)")
+    print("🤖 Бот запущен! (Safe Session Split)")
     client.run_until_disconnected()
