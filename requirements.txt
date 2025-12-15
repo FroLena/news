@@ -6,3 +6,5 @@ nest_asyncio
 httpx # <--- НОВАЯ БИБЛИОТЕКА
 apscheduler
 edge-tts
+pytz
+apscheduler
