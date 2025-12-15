@@ -2,18 +2,16 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from telethon import TelegramClient
 import pytz
-from stats import stats_db  # Импортируем нашу БД
+from stats import stats_db
 
-# ID твоего канала, куда слать отчет (или username строкой)
-# Можно также использовать 'me' для тестов в Избранное
-REPORT_DESTINATION = '@s_ostatok' # Поменяй на ID канала или username, например '@my_news_channel'
+# ID твоего канала или 'me' для тестов
+REPORT_DESTINATION = '@s_ostatok' 
 
 async def send_daily_report(client: TelegramClient):
     """Формирует и отправляет отчет"""
     data = stats_db.get_stats()
     
     if not data:
-        # Если за сегодня данных нет, ничего не шлем или шлем пустой отчет
         return
 
     # Расчет сэкономленного времени (примерно 2 мин на пост)
@@ -42,7 +40,10 @@ async def send_daily_report(client: TelegramClient):
         print(f"Ошибка отправки отчета: {e}")
 
 def start_scheduler(client: TelegramClient):
-    scheduler = AsyncIOScheduler()
+    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+    # Мы явно передаем event_loop из клиента Telethon
+    scheduler = AsyncIOScheduler(event_loop=client.loop)
+    # -------------------------
     
     # Задача: каждый день в 21:30 по Москве
     scheduler.add_job(
@@ -52,4 +53,4 @@ def start_scheduler(client: TelegramClient):
     )
     
     scheduler.start()
-    print("Планировщик запущен (21:30 MSK).")
+    print("Планировщик статистики запущен (21:30 MSK).")
