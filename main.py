@@ -19,39 +19,43 @@ SOURCE_CHANNELS = [
 ]
 DESTINATION = '@s_ostatok'
 
-# --- АВТОМАТИЧЕСКОЕ ОПРЕДЕЛЕНИЕ СРЕДЫ (ЗАЩИТА ОТ КОНФЛИКТОВ) ---
-# Если мы на сервере (есть папка /data), используем постоянное хранилище.
-# Если мы на ПК/в Google Shell, используем локальные файлы.
+# --- НАСТРОЙКА ПУТЕЙ (РЕШЕНИЕ ПРОБЛЕМЫ PERSISTENCE) ---
+# Проверяем, есть ли папка /data (признак сервера Amvera)
 if os.path.exists('/data'):
-    print("🖥 Обнаружена среда сервера (Amvera/Docker). Использую /data")
+    print("🖥 СРЕДА: СЕРВЕР. Использую постоянное хранилище /data")
+    # Файл истории сохраняем в вечную память
     HISTORY_FILE = '/data/history.json'
-    # Имя сессии для ПРОДАКШЕНА (на сервере)
+    # Сессию берем из вечной памяти (туда ты её загрузишь руками)
     SESSION_PATH = '/data/amvera_prod' 
 else:
-    print("💻 Обнаружена локальная среда (PC/Google Shell). Использую локальные файлы")
+    print("💻 СРЕДА: ЛОКАЛЬНАЯ. Использую файлы рядом со скриптом")
     HISTORY_FILE = 'history.json'
-    # Имя сессии для ТЕСТОВ (чтобы не убить боевую сессию)
-    SESSION_PATH = 'local_session_test' 
+    SESSION_PATH = 'local_test_session' # Другое имя для тестов на ПК
 
 MAX_VIDEO_SIZE = 50 * 1024 * 1024 
 AI_MODEL = "openai/gpt-4o-mini"
 
-# 2. Клиент Телеграм
+# 2. Инициализация клиента
+# Бот попробует найти файл сессии по указанному пути.
+# На сервере он будет искать /data/amvera_prod.session
 client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
+
 raw_text_cache = []
 
-# --- РАБОТА С ИСТОРИЕЙ (JSON) ---
+# --- ФУНКЦИИ ИСТОРИИ (С ЗАЩИТОЙ ОТ СТИРАНИЯ) ---
 def load_history():
+    # Если файла еще нет (первый запуск), возвращаем пустой список
     if not os.path.exists(HISTORY_FILE):
         return []
     try:
         with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
+            # Фильтр: оставляем только новости за последние 24 часа
             current_time = time.time()
-            # Оставляем новости за последние 24 часа
             fresh_data = [item for item in data if current_time - item['timestamp'] < 86400]
             return fresh_data
-    except:
+    except Exception as e:
+        print(f"⚠️ Ошибка чтения истории: {e}")
         return []
 
 def save_to_history(text_essence):
@@ -64,10 +68,14 @@ def save_to_history(text_essence):
     if len(history) > 50:
         history = history[-50:]
     
-    with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-        json.dump(history, f, ensure_ascii=False, indent=4)
+    # Вот тут возникала ошибка! Теперь мы пишем в HISTORY_FILE, который ведет в /data
+    try:
+        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+            json.dump(history, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"❌ Ошибка записи в историю (/data): {e}")
 
-# --- ПРЯМОЙ ЗАПРОС К GPT ---
+# --- GPT ЗАПРОС ---
 async def ask_gpt_direct(system_prompt, user_text):
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
@@ -91,8 +99,6 @@ async def ask_gpt_direct(system_prompt, user_text):
                 if response.status_code == 200:
                     data = response.json()
                     return data['choices'][0]['message']['content']
-                else:
-                    print(f"⚠️ OpenAI Error ({response.status_code})")
             except: pass
             await asyncio.sleep(5)
     return None
@@ -102,14 +108,11 @@ async def generate_image(prompt_text):
     clean_prompt = prompt_text.replace('|||', '').strip()
     clean_prompt = clean_prompt.replace('=== ПРОМПТ ===', '').strip()
     
-    print(f"🎨 Рисую (Flux): {clean_prompt[:60]}...")
-    
     encoded_prompt = urllib.parse.quote(clean_prompt)
     import random
     seed = random.randint(1, 1000000)
-    # Используем Flux-Realism
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&model=flux-realism&seed={seed}&nologo=true"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0"}
 
     for attempt in range(3):
         async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as http_client:
@@ -136,17 +139,15 @@ async def send_evening_podcast():
         full_text = "\n\n".join(history_posts[:20])
 
         system_prompt = (
-            "Ты — ведущий шоу «Сухой остаток». Создай сценарий подкаста на 60-90 секунд.\n"
+            "Ты — ведущий шоу «Сухой остаток». Создай сценарий подкаста на 60 секунд.\n"
             "Стиль: Живой, ироничный. Без сложных цифр."
         )
-        
         script = await ask_gpt_direct(system_prompt, full_text)
         if not script: return
 
         script = script.replace('*', '').replace('#', '')
         communicate = edge_tts.Communicate(script, "ru-RU-DmitryNeural")
         await communicate.save("podcast.mp3")
-            
         await client.send_file(DESTINATION, "podcast.mp3", caption="🎙 <b>Итоги дня</b>", parse_mode='html', voice_note=True)
         if os.path.exists("podcast.mp3"): os.remove("podcast.mp3")
     except Exception as e:
@@ -155,7 +156,6 @@ async def send_evening_podcast():
 # --- AI РЕДАКТОР ---
 async def rewrite_news(text):
     history_items = load_history()
-    # Берем последние 15 заголовков для контекста
     recent_history = history_items[-15:]
     history_str = "\n".join([f"- {item['text']}" for item in recent_history]) if recent_history else "История пуста."
 
@@ -167,10 +167,10 @@ async def rewrite_news(text):
         f"2. ДУБЛИ -> ВЕРНИ: DUPLICATE (Если событие уже было в списке выше).\n\n"
         f"ЧАСТЬ 2. ПРАВИЛА ТЕКСТА (Русский, HTML):\n"
         f"- Используй <b>жирный</b>. Markdown (**) НЕЛЬЗЯ.\n"
-        f"- Инфостиль. Без 'мы'.\n"
+        f"- Инфостиль.\n"
         f"- Структура: Реакция -> Заголовок -> Текст -> Суть -> Опрос.\n\n"
-        f"ЧАСТЬ 3. ПРАВИЛА КАРТИНКИ (English, Visual Safety):\n"
-        f"- Описывай ФИЗИЧЕСКИЕ ОБЪЕКТЫ.\n"
+        f"ЧАСТЬ 3. ПРАВИЛА КАРТИНКИ (English):\n"
+        f"- Описывай ФИЗИЧЕСКИЕ ОБЪЕКТЫ (люди, здания, машины).\n"
         f"- ЗАПРЕТ НА АБСТРАКЦИИ.\n"
         f"- КРИМИНАЛ: Не рисуй насилие. Рисуй 'Police car lights, building exterior'.\n\n"
         f"=== ШАБЛОН ОТВЕТА ===\n"
@@ -185,14 +185,12 @@ async def rewrite_news(text):
         f"|||\n"
         f"Documentary photo description..."
     )
-
     return await ask_gpt_direct(system_prompt, text)
 
 @client.on(events.NewMessage(chats=SOURCE_CHANNELS))
 async def handler(event):
     text = event.message.message
-    if not text: text = "" 
-    if len(text) < 20: return
+    if not text or len(text) < 20: return
 
     short_hash = text[:100]
     if short_hash in raw_text_cache: return
@@ -201,11 +199,8 @@ async def handler(event):
 
     try:
         chat = await event.get_chat()
-        source_name = chat.title
-    except:
-        source_name = "Неизвестный канал"
-    
-    print(f"🔎 Обработка новости из: {source_name}")
+        print(f"🔎 Обработка новости из: {chat.title}")
+    except: pass
     
     full_response = await rewrite_news(text)
     if not full_response: return
@@ -217,7 +212,7 @@ async def handler(event):
         print(f"🗑 Отсечена реклама/мусор")
         return
 
-    # --- ПАРСИНГ ---
+    # --- ПАРСИНГ И ОТПРАВКА (Стандартный блок) ---
     raw_text = full_response
     image_prompt = None
     
@@ -235,7 +230,6 @@ async def handler(event):
             subparts = parts[1].split("||")
             reaction = subparts[0].strip()
             news_text = subparts[1].strip()
-            print(f"😎 Реакция: {reaction}")
         except: pass
 
     poll_data = None
@@ -250,24 +244,20 @@ async def handler(event):
         except: pass
 
     if not image_prompt and event.message.photo:
-        print("⚠️ Авто-промпт...")
         base_prompt = news_text.replace('\n', ' ')[:200]
         image_prompt = f"Documentary photograph: {base_prompt}. Realistic film grain, 4k journalism."
 
-    # --- ОТПРАВКА ---
     path_to_image = None
     sent_msg = None
     try:
         has_video = event.message.video is not None
-        
         if has_video:
             if event.message.file.size > MAX_VIDEO_SIZE:
                 sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
             else:
                 path = await event.download_media()
-                sent_msg = await client.send_file(DESTINATION, path, caption=news_text, parse_mode='html', supports_streaming=True)
+                sent_msg = await client.send_file(DESTINATION, path, caption=news_text, parse_mode='html')
                 os.remove(path)
-        
         elif image_prompt:
             path_to_image = await generate_image(image_prompt)
             if path_to_image and os.path.exists(path_to_image):
@@ -301,13 +291,12 @@ async def handler(event):
 
         print("✅ Пост готов!")
         
-        # Сохранение в историю (Суть)
         essence = news_text
         if "📌 Суть:" in news_text:
-            try: 
-                essence = news_text.split("📌 Суть:")[1].replace("</blockquote>", "").strip()
+            try: essence = news_text.split("📌 Суть:")[1].replace("</blockquote>", "").strip()
             except: pass
         
+        # Запись в историю в /data/history.json
         save_to_history(essence)
 
     except Exception as e:
@@ -318,16 +307,9 @@ async def handler(event):
 
 if __name__ == '__main__':
     print("🚀 Старт...")
-    
-    # Инициализация папки данных для локального теста
-    if not os.path.exists('/data'):
-        try:
-            os.makedirs('/data', exist_ok=True)
-        except: pass
-
     client.start()
     scheduler = AsyncIOScheduler(event_loop=client.loop)
     scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
     scheduler.start()
-    print("🤖 Бот запущен! (Safe Session Split)")
+    print("🤖 Бот запущен!")
     client.run_until_disconnected()
