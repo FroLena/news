@@ -79,7 +79,7 @@ def save_to_history(text_essence):
             json.dump(history, f, ensure_ascii=False, indent=4)
     except: pass
 
-# --- GPT ЗАПРОС (ИСПРАВЛЕНО: ЛОГИРОВАНИЕ ОШИБОК) ---
+# --- GPT ЗАПРОС ---
 async def ask_gpt_direct(system_prompt, user_text):
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
@@ -244,7 +244,7 @@ async def rewrite_news(text):
 
 @client.on(events.NewMessage(chats=SOURCE_CHANNELS))
 async def handler(event):
-    # Инициализируем переменные в начале, чтобы finally не упал
+    # Инициализируем переменные, чтобы finally не упал
     path_to_image = None
     path_to_video = None
     
@@ -322,7 +322,8 @@ async def handler(event):
                 sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
             else:
                 path_to_video = await event.download_media() # Сохраняем путь к видео
-                sent_msg = await client.send_file(DESTINATION, path_to_video, caption=news_text, parse_mode='html')
+                if path_to_video: # Проверка что видео скачалось
+                     sent_msg = await client.send_file(DESTINATION, path_to_video, caption=news_text, parse_mode='html')
                 
         elif image_prompt:
             path_to_image = await generate_image(image_prompt)
