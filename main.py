@@ -14,10 +14,19 @@ from stats import stats_db
 from scheduler import start_scheduler
 
 # 1. Настройки
-API_ID = int(os.environ.get('TG_API_ID'))
-API_HASH = os.environ.get('TG_API_HASH')
-OPENAI_KEY = os.environ.get('OPENAI_API_KEY')
-SESSION_STRING = os.environ.get('TG_SESSION_STR')
+try:
+    API_ID = int(os.environ.get('TG_API_ID', 0))
+    API_HASH = os.environ.get('TG_API_HASH')
+    OPENAI_KEY = os.environ.get('OPENAI_API_KEY')
+    SESSION_STRING = os.environ.get('TG_SESSION_STR')
+    
+    if API_ID == 0 or not API_HASH:
+        raise ValueError("Не заданы API_ID или API_HASH")
+except Exception as e:
+    print(f"❌ КРИТИЧЕСКАЯ ОШИБКА НАСТРОЕК: {e}")
+    print("Проверьте 'Переменные' (Environment Variables) в панели управления хостинга!")
+    time.sleep(30) # Даем время прочитать лог перед падением
+    exit(1)
 
 SOURCE_CHANNELS = [
     'rian_ru', 'rentv_channel', 'breakingmash', 'bazabazon', 
