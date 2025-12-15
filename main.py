@@ -4,14 +4,121 @@ import json
 import httpx
 import urllib.parse
 import time
+import sqlite3
+import pytz
+from datetime import datetime
 from telethon import TelegramClient, events, types, functions
 from telethon.sessions import StringSession
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 import edge_tts
 
-# --- ИМПОРТЫ СТАТИСТИКИ ---
-from stats import stats_db
-from scheduler import start_scheduler
+# ==========================================
+# ЧАСТЬ 1. СТАТИСТИКА (Встроено)
+# ==========================================
+
+# Проверяем путь для базы данных
+if os.path.exists('/data'):
+    DB_PATH = os.path.join('/data', 'stats.db')
+else:
+    DB_PATH = os.path.join('.', 'stats.db')
+
+MSK_TZ = pytz.timezone('Europe/Moscow')
+
+class StatsManager:
+    def __init__(self):
+        self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        self.cursor = self.conn.cursor()
+        self._init_db()
+
+    def _init_db(self):
+        """Создает таблицу, если её нет"""
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS daily_stats (
+                date TEXT PRIMARY KEY,
+                scanned INTEGER DEFAULT 0,
+                published INTEGER DEFAULT 0,
+                rejected_ads INTEGER DEFAULT 0,
+                rejected_dups INTEGER DEFAULT 0,
+                rejected_other INTEGER DEFAULT 0
+            )
+        ''')
+        self.conn.commit()
+
+    def _get_today_str(self):
+        return datetime.now(MSK_TZ).strftime('%Y-%m-%d')
+
+    def increment(self, field):
+        today = self._get_today_str()
+        try:
+            self.cursor.execute(f'UPDATE daily_stats SET {field} = {field} + 1 WHERE date = ?', (today,))
+            if self.cursor.rowcount == 0:
+                self.cursor.execute(f'INSERT INTO daily_stats (date, {field}) VALUES (?, 1)', (today,))
+            self.conn.commit()
+        except Exception as e:
+            print(f"⚠️ Ошибка БД: {e}")
+
+    def get_stats(self, date_str=None):
+        if not date_str:
+            date_str = self._get_today_str()
+        self.cursor.execute('SELECT * FROM daily_stats WHERE date = ?', (date_str,))
+        row = self.cursor.fetchone()
+        if row:
+            return {
+                'date': row[0],
+                'scanned': row[1],
+                'published': row[2],
+                'rejected_ads': row[3],
+                'rejected_dups': row[4],
+                'rejected_other': row[5]
+            }
+        return None
+
+# Инициализируем БД
+stats_db = StatsManager()
+
+# ==========================================
+# ЧАСТЬ 2. ПЛАНИРОВЩИК (Встроено)
+# ==========================================
+
+REPORT_DESTINATION = '@s_ostatok'
+
+async def send_daily_report(client: TelegramClient):
+    """Формирует и отправляет отчет"""
+    print("📊 Формирую ежедневный отчет...")
+    data = stats_db.get_stats()
+    
+    if not data:
+        print("📊 Данных за сегодня нет.")
+        return
+
+    saved_minutes = (data['scanned'] - data['published']) * 2
+    saved_hours = round(saved_minutes / 60, 1)
+
+    text = (
+        f"🌙 **Итоги дня: {data['date']}**\n\n"
+        f"Сегодня я просеял для вас весь информационный шум.\n\n"
+        f"📊 **Сухие цифры:**\n"
+        f"• Просканировано постов: {data['scanned']}\n"
+        f"• Опубликовано в канале: {data['published']}\n"
+        f"• Отсеяно мусора: {data['scanned'] - data['published']}\n"
+        f"  ├ 🛑 Реклама: {data['rejected_ads']}\n"
+        f"  ├ 👯 Дубли: {data['rejected_dups']}\n"
+        f"  └ 📉 Несущественное: {data['rejected_other']}\n\n"
+        f"⏳ **Ваша выгода:**\n"
+        f"Вы сэкономили ~{saved_hours} часа времени, не читая лишнее.\n"
+        f"Спокойной ночи! 🤖"
+    )
+
+    try:
+        await client.send_message(REPORT_DESTINATION, text)
+        print("✅ Ежедневный отчет отправлен.")
+    except Exception as e:
+        print(f"❌ Ошибка отправки отчета: {e}")
+
+# ==========================================
+# ЧАСТЬ 3. ОСНОВНОЙ БОТ
+# ==========================================
 
 # 1. Настройки
 try:
@@ -24,8 +131,7 @@ try:
         raise ValueError("Не заданы API_ID или API_HASH")
 except Exception as e:
     print(f"❌ КРИТИЧЕСКАЯ ОШИБКА НАСТРОЕК: {e}")
-    print("Проверьте 'Переменные' (Environment Variables) в панели управления хостинга!")
-    time.sleep(30) # Даем время прочитать лог перед падением
+    time.sleep(30)
     exit(1)
 
 SOURCE_CHANNELS = [
@@ -34,7 +140,7 @@ SOURCE_CHANNELS = [
 ]
 DESTINATION = '@s_ostatok'
 
-# --- ПУТИ (Fix Persistence) ---
+# Пути
 if os.path.exists('/data'):
     print("🖥 СРЕДА: СЕРВЕР (Amvera). Все файлы пишу в /data")
     BASE_DIR = '/data'
@@ -48,11 +154,7 @@ PODCAST_FILE = os.path.join(BASE_DIR, 'podcast.mp3')
 MAX_VIDEO_SIZE = 50 * 1024 * 1024 
 AI_MODEL = "openai/gpt-4o-mini"
 
-# 2. Клиент
-if not SESSION_STRING:
-    print("❌ ОШИБКА: Не найдена переменная TG_SESSION_STR!")
-    exit(1)
-
+# Клиент
 try:
     client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 except Exception as e:
@@ -113,17 +215,12 @@ async def ask_gpt_direct(system_prompt, user_text):
 # --- ГЕНЕРАЦИЯ КАРТИНКИ ---
 async def generate_image(prompt_text):
     clean_prompt = prompt_text.replace('|||', '').replace('=== ПРОМПТ ===', '').strip()
-    
-    # Жесткий суффикс для резкости
     tech_suffix = " . Shot on Phase One XF IQ4, 150MP, ISO 100, f/8, crystal clear, sharp focus, professional stock photography, no grain, no blur, bright lighting."
     final_prompt = clean_prompt + tech_suffix
-    
     encoded_prompt = urllib.parse.quote(final_prompt)
     import random
     seed = random.randint(1, 1000000)
     filename = os.path.join(BASE_DIR, f"image_{seed}.jpg")
-    
-    # Модель flux
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&model=flux&seed={seed}&nologo=true"
     
     for _ in range(3):
@@ -182,7 +279,6 @@ async def rewrite_news(text):
         f"Ты — циничный и строгий главный редактор канала 'Сухой остаток'.\n"
         f"Твоя задача: Выжимать факты из новостей, безжалостно убирая воду и канцелярщину.\n"
         f"СПИСОК ОПУБЛИКОВАННЫХ СОБЫТИЙ (ЧТОБЫ НЕ ПОВТОРЯТЬСЯ):\n{history_str}\n\n"
-        
         f"=== ЧАСТЬ 1. ЖЕСТКИЙ ФИЛЬТР ===\n"
         f"1. РЕКЛАМА -> ВЕРНИ: SKIP\n"
         f"   (Любые продажи, 'erid', промокоды, ссылки на каналы, 'партнерский материал', курсы).\n"
@@ -190,7 +286,6 @@ async def rewrite_news(text):
         f"   (Если новость об этом событии уже есть в списке выше).\n"
         f"3. МУСОР -> ВЕРНИ: SKIP\n"
         f"   (Пожелания доброго утра, размытые фото без контекста, поздравления с праздниками).\n\n"
-        
         f"=== ЧАСТЬ 2. ПРАВИЛА ТЕКСТА (INFOSTYLE) ===\n"
         f"Язык: Русский. Формат: HTML.\n"
         f"1. ТЕГИ: Используй только <b>жирный</b>. Markdown (**) ЗАПРЕЩЕН.\n"
@@ -203,7 +298,6 @@ async def rewrite_news(text):
         f"   - <b>Заголовок</b> (Хлесткий, 3-6 слов, без точки на конце).\n"
         f"   - Текст новости (Кто, что сделал, последствия).\n"
         f"   - <blockquote><b>📌 Суть:</b> (Короткий вывод или ирония редактора).</blockquote>\n"
-        
         f"=== ЧАСТЬ 3. ПРАВИЛА ОПРОСОВ (ВАЖНО!) ===\n"
         f"Ты ОБЯЗАН создать опрос, если в новости есть:\n"
         f" - ДЕНЬГИ (Цены, зарплаты, штрафы, крипта).\n"
@@ -213,21 +307,18 @@ async def rewrite_news(text):
         f"Вопрос должен быть ПРОВОКАЦИОННЫМ. Не спрашивай 'Как вы к этому относитесь?'.\n"
         f"Спрашивай конкретно: 'Пора валить?', 'Оштрафуют нас?', 'Это прорыв или скам?'.\n"
         f"Цель: Заставить читателя тыкнуть кнопку.\n\n"
-        
         f"=== ЧАСТЬ 4. ПРАВИЛА КАРТИНКИ (DIGITAL STOCK PHOTO) ===\n"
         f"Prompt strictly in English.\n"
         f"Target: High-end commercial photography, 8k resolution.\n"
         f"Style: Shot on Phase One XF IQ4, 150MP, sharp focus, bright natural lighting.\n"
         f"Content: Describe the scene objectively. NO TEXT in image. NO BLUR.\n"
         f"Restriction: If crime/war -> use symbolic objects (police tape, gavel, silhouette), no gore/blood.\n\n"
-        
         f"=== ШАБЛОН ОТВЕТА (ЕСЛИ НЕТ ОПРОСА) ===\n"
         f"||R:🔥|| <b>Заголовок</b>\n"
         f"Текст...\n"
         f"<blockquote><b>📌 Суть:</b> Вывод.</blockquote>\n"
         f"|||\n"
         f"Prompt...\n\n"
-
         f"=== ШАБЛОН ОТВЕТА (С ОПРОСОМ) ===\n"
         f"||R:😱|| <b>Заголовок</b>\n"
         f"Текст...\n"
@@ -239,12 +330,10 @@ async def rewrite_news(text):
         f"|||\n"
         f"Prompt..."
     )
-    
     return await ask_gpt_direct(system_prompt, text)
 
 @client.on(events.NewMessage(chats=SOURCE_CHANNELS))
 async def handler(event):
-    # Инициализируем переменные, чтобы finally не упал
     path_to_image = None
     path_to_video = None
     
@@ -267,7 +356,7 @@ async def handler(event):
     
     if not full_response:
         stats_db.increment('rejected_other')
-        print("❌ GPT вернул пустоту (см. ошибки выше)")
+        print("❌ GPT вернул пустоту")
         return
 
     if "DUPLICATE" in full_response: 
@@ -279,10 +368,8 @@ async def handler(event):
         stats_db.increment('rejected_ads')
         return
 
-    # --- ПАРСИНГ ---
     raw_text = full_response
     image_prompt = None
-    
     if "|||" in full_response:
         parts = full_response.split("|||")
         news_text = parts[0].strip()
@@ -321,10 +408,9 @@ async def handler(event):
             if event.message.file.size > MAX_VIDEO_SIZE:
                 sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
             else:
-                path_to_video = await event.download_media() # Сохраняем путь к видео
-                if path_to_video: # Проверка что видео скачалось
+                path_to_video = await event.download_media()
+                if path_to_video:
                      sent_msg = await client.send_file(DESTINATION, path_to_video, caption=news_text, parse_mode='html')
-                
         elif image_prompt:
             path_to_image = await generate_image(image_prompt)
             if path_to_image and os.path.exists(path_to_image):
@@ -336,7 +422,7 @@ async def handler(event):
 
         if sent_msg:
             stats_db.increment('published')
-            print(f"✅ Пост опубликован! ID: {sent_msg.id} | Канал: {DESTINATION}")
+            print(f"✅ Пост опубликован! ID: {sent_msg.id}")
             
             essence = news_text
             if "📌 Суть:" in news_text:
@@ -366,13 +452,12 @@ async def handler(event):
                     ))
                 except: pass
         else:
-            print("⚠️ Ошибка: Пост не был отправлен (sent_msg is None)")
+            print("⚠️ Ошибка: Пост не был отправлен")
 
     except Exception as e:
         print(f"❌ Критическая ошибка отправки: {e}")
         stats_db.increment('rejected_other')
     finally:
-        # Безопасное удаление всех временных файлов
         if path_to_image and os.path.exists(path_to_image):
             try: os.remove(path_to_image)
             except: pass
@@ -388,9 +473,17 @@ if __name__ == '__main__':
 
     if client:
         client.start()
+        
+        # Запускаем планировщики
         scheduler = AsyncIOScheduler(event_loop=client.loop)
+        
+        # 1. Подкаст (18:00)
         scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
+        
+        # 2. Статистика (00:00)
+        scheduler.add_job(send_daily_report, CronTrigger(hour=0, minute=0, timezone=pytz.timezone('Europe/Moscow')), args=[client])
+        
         scheduler.start()
-        start_scheduler(client)
-        print("🤖 Бот запущен! (CLEAN CODE + DEBUG MODE)")
+        
+        print("🤖 Бот запущен! (ALL IN ONE VERSION)")
         client.run_until_disconnected()
