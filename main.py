@@ -9,7 +9,7 @@ from telethon.sessions import StringSession
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import edge_tts
 
-# 1. Настройки из переменных окружения
+# 1. Настройки
 API_ID = int(os.environ.get('TG_API_ID'))
 API_HASH = os.environ.get('TG_API_HASH')
 OPENAI_KEY = os.environ.get('OPENAI_API_KEY')
@@ -21,8 +21,7 @@ SOURCE_CHANNELS = [
 ]
 DESTINATION = '@s_ostatok'
 
-# --- НАСТРОЙКА ПУТЕЙ (Fix Persistence) ---
-# Если мы на сервере, пишем всё в /data. Если локально — в текущую папку.
+# --- ПУТИ (Fix Persistence) ---
 if os.path.exists('/data'):
     print("🖥 СРЕДА: СЕРВЕР (Amvera). Все файлы пишу в /data")
     BASE_DIR = '/data'
@@ -36,7 +35,7 @@ PODCAST_FILE = os.path.join(BASE_DIR, 'podcast.mp3')
 MAX_VIDEO_SIZE = 50 * 1024 * 1024 
 AI_MODEL = "openai/gpt-4o-mini"
 
-# 2. Инициализация клиента (StringSession)
+# 2. Клиент
 if not SESSION_STRING:
     print("❌ ОШИБКА: Не найдена переменная TG_SESSION_STR!")
     exit(1)
@@ -44,39 +43,28 @@ if not SESSION_STRING:
 try:
     client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 except Exception as e:
-    print(f"❌ Ошибка инициализации клиента: {e}")
+    print(f"❌ Ошибка клиента: {e}")
     client = None
 
 raw_text_cache = []
 
-# --- ФУНКЦИИ ИСТОРИИ ---
+# --- ИСТОРИЯ ---
 def load_history():
-    if not os.path.exists(HISTORY_FILE):
-        return []
+    if not os.path.exists(HISTORY_FILE): return []
     try:
         with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            current_time = time.time()
-            fresh_data = [item for item in data if current_time - item['timestamp'] < 86400]
-            return fresh_data
-    except Exception as e:
-        print(f"⚠️ Ошибка чтения истории: {e}")
-        return []
+            return [item for item in data if time.time() - item['timestamp'] < 86400]
+    except: return []
 
 def save_to_history(text_essence):
     history = load_history()
-    history.append({
-        'text': text_essence,
-        'timestamp': time.time()
-    })
-    if len(history) > 50:
-        history = history[-50:]
-    
+    history.append({'text': text_essence, 'timestamp': time.time()})
+    if len(history) > 50: history = history[-50:]
     try:
         with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
             json.dump(history, f, ensure_ascii=False, indent=4)
-    except Exception as e:
-        print(f"❌ Ошибка записи истории в {HISTORY_FILE}: {e}")
+    except: pass
 
 # --- GPT ЗАПРОС ---
 async def ask_gpt_direct(system_prompt, user_text):
@@ -89,52 +77,46 @@ async def ask_gpt_direct(system_prompt, user_text):
     }
     payload = {
         "model": AI_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_text}
-        ]
+        "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_text}]
     }
-
-    for attempt in range(3):
+    for _ in range(3):
         async with httpx.AsyncClient(timeout=60.0) as http_client:
             try:
                 response = await http_client.post(url, headers=headers, json=payload)
                 if response.status_code == 200:
-                    data = response.json()
-                    return data['choices'][0]['message']['content']
+                    return response.json()['choices'][0]['message']['content']
             except: pass
             await asyncio.sleep(5)
     return None
 
-# --- ГЕНЕРАЦИЯ КАРТИНКИ ---
+# --- ГЕНЕРАЦИЯ КАРТИНКИ (ТОЛЬКО ТУТ ИЗМЕНЕНИЯ - УБИРАЕМ ЗЕРНО) ---
 async def generate_image(prompt_text):
-    clean_prompt = prompt_text.replace('|||', '').strip()
-    clean_prompt = clean_prompt.replace('=== ПРОМПТ ===', '').strip()
+    clean_prompt = prompt_text.replace('|||', '').replace('=== ПРОМПТ ===', '').strip()
     
-    encoded_prompt = urllib.parse.quote(clean_prompt)
+    # Жесткий суффикс для резкости (как мы договорились)
+    tech_suffix = " . Shot on Phase One XF IQ4, 150MP, ISO 100, f/8, crystal clear, sharp focus, professional stock photography, no grain, no blur, bright lighting."
+    final_prompt = clean_prompt + tech_suffix
+    
+    encoded_prompt = urllib.parse.quote(final_prompt)
     import random
     seed = random.randint(1, 1000000)
-    
-    # Файл сохраняем в правильную папку BASE_DIR
     filename = os.path.join(BASE_DIR, f"image_{seed}.jpg")
     
-    # Используем модель flux-realism без логотипа
-    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&model=flux-realism&seed={seed}&nologo=true"
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    for attempt in range(3):
+    # Модель flux (без realism) для цифровой четкости
+    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&model=flux&seed={seed}&nologo=true"
+    
+    for _ in range(3):
         async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as http_client:
             try:
-                response = await http_client.get(url, headers=headers)
+                response = await http_client.get(url)
                 if response.status_code == 200:
-                    with open(filename, "wb") as f:
-                        f.write(response.content)
+                    with open(filename, "wb") as f: f.write(response.content)
                     return filename
             except: pass
             await asyncio.sleep(2)
     return None
 
-# --- ПОДКАСТ ---
+# --- ПОДКАСТ (ВЕРНУЛ СТАРЫЙ ПРОМПТ) ---
 async def send_evening_podcast():
     print("🎙 Готовлю подкаст...")
     try:
@@ -145,10 +127,19 @@ async def send_evening_podcast():
         if not history_posts: return
         full_text = "\n\n".join(history_posts[:20])
 
+        # Вернул полный промпт, как ты просил
         system_prompt = (
-            "Ты — ведущий шоу «Сухой остаток». Создай сценарий подкаста на 60 секунд.\n"
-            "Стиль: Живой, ироничный. Без сложных цифр."
+            "Ты — профессиональный радиоведущий итогового шоу «Сухой остаток».\n"
+            "Твоя задача: Создать увлекательный сценарий на основе предоставленных новостей за день.\n\n"
+            "ТРЕБОВАНИЯ К ТЕКСТУ:\n"
+            "1. СТРУКТУРА: Вступление -> Плавный рассказ (3-5 главных тем) -> Заключение.\n"
+            "2. СТИЛЬ: Живой, разговорный, немного ироничный, но уверенный.\n"
+            "3. АДАПТАЦИЯ ПОД ОЗВУЧКУ: Не используй сложные цифры, убери ссылки и спецсимволы.\n"
+            "4. ХРОНОМЕТРАЖ: 60-90 секунд.\n\n"
+            "НАЧАЛО: 'Добрый вечер. В эфире Сухой остаток. Подведем итоги этого дня.'\n"
+            "КОНЕЦ: 'Таким был этот день. Оставайтесь с нами. До связи.'"
         )
+        
         script = await ask_gpt_direct(system_prompt, full_text)
         if not script: return
 
@@ -157,12 +148,11 @@ async def send_evening_podcast():
         
         await communicate.save(PODCAST_FILE)
         await client.send_file(DESTINATION, PODCAST_FILE, caption="🎙 <b>Итоги дня</b>", parse_mode='html', voice_note=True)
-        
         if os.path.exists(PODCAST_FILE): os.remove(PODCAST_FILE)
     except Exception as e:
         print(f"❌ Ошибка подкаста: {e}")
 
-# --- AI РЕДАКТОР (С ОБНОВЛЕННЫМ СТИЛЕМ IMAX) ---
+# --- AI РЕДАКТОР (ВЕРНУЛ СТАРЫЙ ТЕКСТ + НОВЫЙ БЛОК КАРТИНОК) ---
 async def rewrite_news(text):
     history_items = load_history()
     recent_history = history_items[-15:]
@@ -177,23 +167,23 @@ async def rewrite_news(text):
         f"ЧАСТЬ 2. ПРАВИЛА ТЕКСТА (Русский, HTML):\n"
         f"- Используй <b>жирный</b>. Markdown (**) НЕЛЬЗЯ.\n"
         f"- Инфостиль. Структура: Реакция -> Заголовок -> Текст -> Суть -> Опрос.\n\n"
-        f"ЧАСТЬ 3. ПРАВИЛА КАРТИНКИ (English, IMAX Quality):\n"
-        f"- Твоя задача: Описать сцену как дорогую документальную фотографию высокого разрешения.\n"
-        f"- Описывай ТОЛЬКО физические объекты, время суток, погоду.\n"
-        f"- ЗАПРЕТ НА СЛОВА: 'grain', 'film grain', 'cinematic lighting', 'dramatic', 'blur'.\n"
-        f"- ВМЕСТО ЭТОГО ПИШИ: 'Sharp focus', 'Natural daylight', 'Highly detailed', 'Realistic textures'.\n"
-        f"- КРИМИНАЛ: Рисуй 'Police tape, emergency vehicle lights, building exterior'. Без насилия.\n\n"
-        f"=== ШАБЛОН ОТВЕТА ===\n"
-        f"||R:🔥|| <b>Заголовок</b>\n"
+        f"ЧАСТЬ 3. ПРАВИЛА КАРТИНКИ (English, DIGITAL STOCK QUALITY):\n"
+        f"- Забудь про 'cinematic', 'film', 'atmosphere', 'grain'.\n"
+        f"- Твоя цель: Идеально четкое цифровое фото для фотостока.\n"
+        f"- Описывай объекты и СВЕТ (Bright natural light).\n"
+        f"- Используй слова: 'Sharp focus', '4k', 'Digital photography'.\n"
+        f"- КРИМИНАЛ: Только косвенные признаки (мигалки, ленты). Без насилия.\n\n"
+        f"=== ШАБЛОН ОТВЕТА (СТРОГО СОБЛЮДАЙ ЭТУ СТРУКТУРУ) ===\n"
+        f"||R:🔥|| <b>Заголовок новости</b>\n"
         f"\n"
-        f"Текст новости.\n"
-        f"<blockquote><b>📌 Суть:</b> Вывод.</blockquote>\n"
+        f"Текст новости одним абзацем.\n"
+        f"<blockquote><b>📌 Суть:</b> Короткий вывод.</blockquote>\n"
         f"||POLL||\n"
-        f"Вопрос?\n"
-        f"Вариант 1\n"
-        f"Вариант 2\n"
+        f"Вопрос опроса?\n"
+        f"Ответ 1\n"
+        f"Ответ 2\n"
         f"|||\n"
-        f"A detailed documentary photograph shot on IMAX camera: [Описание сцены]. Natural daylight, sharp focus, highly detailed textures, realistic colors, 8k resolution."
+        f"High-end commercial photo of [Описание сцены]. Bright daylight, sharp details, 8k resolution."
     )
     return await ask_gpt_direct(system_prompt, text)
 
@@ -254,9 +244,9 @@ async def handler(event):
         except: pass
 
     if not image_prompt and event.message.photo:
-        # Обновил авто-промпт под новый стиль
         base_prompt = news_text.replace('\n', ' ')[:200]
-        image_prompt = f"A detailed documentary photograph shot on IMAX camera: {base_prompt}. Natural daylight, sharp focus, highly detailed textures, realistic colors, 8k resolution."
+        # Обновил авто-промпт под новый стиль
+        image_prompt = f"Commercial photo of {base_prompt}. Bright light, 8k sharp."
 
     path_to_image = None
     sent_msg = None
@@ -326,5 +316,5 @@ if __name__ == '__main__':
         scheduler = AsyncIOScheduler(event_loop=client.loop)
         scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
         scheduler.start()
-        print("🤖 Бот запущен! (IMAX Visual Style)")
+        print("🤖 Бот запущен! (DIGITAL SHARPNESS + OLD TEXT STYLE)")
         client.run_until_disconnected()
