@@ -229,21 +229,20 @@ async def handler(event):
         print(f"🔎 Обработка новости из: {chat.title}")
     except: pass
     
+    # ИЗМЕНЕНИЕ 1: Передаем больше истории, чтобы лучше ловить дубли
+    # В функции rewrite_news тоже нужно поменять recent_history = history_items[-15:] на [-25:]
     full_response = await rewrite_news(text)
     
     if not full_response:
-        # [STAT] Ошибка GPT или пустой ответ
         stats_db.increment('rejected_other')
         return
 
     if "DUPLICATE" in full_response: 
         print(f"❌ Отсечен дубль")
-        # [STAT] Отсеян дубль
         stats_db.increment('rejected_dups')
         return
     if "SKIP" in full_response: 
         print(f"🗑 Отсечена реклама/мусор")
-        # [STAT] Отсеяна реклама
         stats_db.increment('rejected_ads')
         return
 
@@ -280,7 +279,6 @@ async def handler(event):
 
     if not image_prompt and event.message.photo:
         base_prompt = news_text.replace('\n', ' ')[:200]
-        # Обновил авто-промпт под новый стиль
         image_prompt = f"Commercial photo of {base_prompt}. Bright light, 8k sharp."
 
     path_to_image = None
@@ -303,44 +301,44 @@ async def handler(event):
         else:
             sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
 
-        # [STAT] Успешная публикация
+        # [STAT] Успешная публикация + Логирование ID
         if sent_msg:
             stats_db.increment('published')
+            print(f"✅ Пост опубликован! ID: {sent_msg.id} | Канал: {DESTINATION}")
+            
+            essence = news_text
+            if "📌 Суть:" in news_text:
+                try: essence = news_text.split("📌 Суть:")[1].replace("</blockquote>", "").strip()
+                except: pass
+            save_to_history(essence)
+            
+            # Реакции и опросы только если сообщение реально ушло
+            if reaction:
+                await asyncio.sleep(2)
+                try:
+                    await client(functions.messages.SendReactionRequest(
+                        peer=DESTINATION,
+                        msg_id=sent_msg.id,
+                        reaction=[types.ReactionEmoji(emoticon=reaction)]
+                    ))
+                except: pass
 
-        if sent_msg and reaction:
-            await asyncio.sleep(2)
-            try:
-                await client(functions.messages.SendReactionRequest(
-                    peer=DESTINATION,
-                    msg_id=sent_msg.id,
-                    reaction=[types.ReactionEmoji(emoticon=reaction)]
-                ))
-            except: pass
-
-        if poll_data:
-            await asyncio.sleep(1)
-            try:
-                await client.send_message(DESTINATION, file=types.InputMediaPoll(
-                    poll=types.Poll(
-                        id=1,
-                        question=poll_data["q"],
-                        answers=[types.PollAnswer(text=o, option=bytes([i])) for i, o in enumerate(poll_data["o"])]
-                    )
-                ))
-            except: pass
-
-        print("✅ Пост готов!")
-        
-        essence = news_text
-        if "📌 Суть:" in news_text:
-            try: essence = news_text.split("📌 Суть:")[1].replace("</blockquote>", "").strip()
-            except: pass
-        
-        save_to_history(essence)
+            if poll_data:
+                await asyncio.sleep(1)
+                try:
+                    await client.send_message(DESTINATION, file=types.InputMediaPoll(
+                        poll=types.Poll(
+                            id=1,
+                            question=poll_data["q"],
+                            answers=[types.PollAnswer(text=o, option=bytes([i])) for i, o in enumerate(poll_data["o"])]
+                        )
+                    ))
+                except: pass
+        else:
+            print("⚠️ Ошибка: Пост не был отправлен (sent_msg is None)")
 
     except Exception as e:
-        print(f"Ошибка отправки: {e}")
-        # [STAT] Техническая ошибка при отправке
+        print(f"❌ Критическая ошибка отправки: {e}")
         stats_db.increment('rejected_other')
     finally:
         if path_to_image and os.path.exists(path_to_image):
