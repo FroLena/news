@@ -1,14 +1,21 @@
 import sqlite3
+import os
 from datetime import datetime
 import pytz
 
-# Настройки
-DB_NAME = "stats.db"
+# --- НАСТРОЙКИ ПУТЕЙ (ИСПРАВЛЕНО) ---
+# Проверяем, есть ли системная папка /data (Amvera)
+if os.path.exists('/data'):
+    DB_PATH = os.path.join('/data', 'stats.db')
+else:
+    DB_PATH = os.path.join('.', 'stats.db')
+
 MSK_TZ = pytz.timezone('Europe/Moscow')
 
 class StatsManager:
     def __init__(self):
-        self.conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+        # Подключаемся по полному пути
+        self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         self.cursor = self.conn.cursor()
         self._init_db()
 
@@ -75,5 +82,5 @@ class StatsManager:
         else:
             return None
 
-# Создаем глобальный экземпляр, чтобы импортировать его в main
+# Создаем глобальный экземпляр
 stats_db = StatsManager()
