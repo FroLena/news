@@ -318,5 +318,8 @@ if __name__ == '__main__':
         scheduler = AsyncIOScheduler(event_loop=client.loop)
         scheduler.add_job(send_evening_podcast, 'cron', hour=18, minute=0)
         scheduler.start()
+        
+        start_scheduler(client)
+        
         print("🤖 Бот запущен! (DIGITAL SHARPNESS + OLD TEXT STYLE)")
         client.run_until_disconnected()
