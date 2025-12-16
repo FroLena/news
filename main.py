@@ -212,7 +212,7 @@ async def ask_gpt_direct(system_prompt, user_text):
     print(f"❌ GPT не ответил после 3 попыток. Последняя ошибка: {last_error}")
     return None
 
-# --- ГЕНЕРАЦИЯ КАРТИНКИ (ОБНОВЛЕНО: ЛОГИ + HEADERS) ---
+# --- ГЕНЕРАЦИЯ КАРТИНКИ (С USER-AGENT) ---
 async def generate_image(prompt_text):
     clean_prompt = prompt_text.replace('|||', '').replace('=== ПРОМПТ ===', '').strip()
     tech_suffix = " . Shot on Phase One XF IQ4, 150MP, ISO 100, f/8, crystal clear, sharp focus, professional stock photography, no grain, no blur, bright lighting."
@@ -225,7 +225,7 @@ async def generate_image(prompt_text):
     
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&model=flux&seed={seed}&nologo=true"
     
-    # Добавляем User-Agent, чтобы не ловить 403 Forbidden
+    # Добавляем User-Agent
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
@@ -238,7 +238,6 @@ async def generate_image(prompt_text):
                 
                 if response.status_code == 200:
                     with open(filename, "wb") as f: f.write(response.content)
-                    # Проверяем, что файл не пустой
                     if os.path.getsize(filename) > 0:
                         return filename
                     else:
@@ -289,7 +288,7 @@ async def send_evening_podcast():
     except Exception as e:
         print(f"❌ Ошибка подкаста: {e}")
 
-# --- AI РЕДАКТОР ---
+# --- AI РЕДАКТОР (ИСПРАВЛЕНЫ ОТСТУПЫ И "СУТЬ") ---
 async def rewrite_news(text):
     history_items = load_history()
     recent_history = history_items[-25:]
@@ -308,7 +307,7 @@ async def rewrite_news(text):
         f"   (Пожелания доброго утра, размытые фото без контекста, поздравления с праздниками).\n\n"
         f"=== ЧАСТЬ 2. ПРАВИЛА ТЕКСТА (INFOSTYLE) ===\n"
         f"Язык: Русский. Формат: HTML.\n"
-        f"1. ТЕГИ: Используй только <b>жирный</b>. Markdown (**) ЗАПРЕЩЕН.\n"
+        f"1. ТЕГИ: Используй только <b>жирный</b> и <blockquote>цитата</blockquote>. Markdown (**) ЗАПРЕЩЕН.\n"
         f"2. СТИЛЬ: Инфостиль Максима Ильяхова. \n"
         f"   - ЗАПРЕЩЕНО: 'Сообщается', 'Стало известно', 'В сети появилось', 'Отметим, что'. Сразу к делу.\n"
         f"   - ЗАПРЕЩЕНО: Оценочные суждения ('Ужасная трагедия', 'Потрясающий успех'). Только факты.\n"
@@ -316,8 +315,9 @@ async def rewrite_news(text):
         f"4. СТРУКТУРА:\n"
         f"   - Реакция (Скрытый тег).\n"
         f"   - <b>Заголовок</b> (Хлесткий, 3-6 слов, без точки на конце).\n"
+        f"   - <ПУСТАЯ СТРОКА>\n"
         f"   - Текст новости (Кто, что сделал, последствия).\n"
-        f"   - <blockquote><b>📌 Суть:</b> (Короткий вывод или ирония редактора).</blockquote>\n"
+        f"   - <blockquote>(Короткий вывод или ирония редактора).</blockquote>\n"
         f"=== ЧАСТЬ 3. ПРАВИЛА ОПРОСОВ (ВАЖНО!) ===\n"
         f"Ты ОБЯЗАН создать опрос, если в новости есть:\n"
         f" - ДЕНЬГИ (Цены, зарплаты, штрафы, крипта).\n"
@@ -333,16 +333,18 @@ async def rewrite_news(text):
         f"Style: Shot on Phase One XF IQ4, 150MP, sharp focus, bright natural lighting.\n"
         f"Content: Describe the scene objectively. NO TEXT in image. NO BLUR.\n"
         f"Restriction: If crime/war -> use symbolic objects (police tape, gavel, silhouette), no gore/blood.\n\n"
+        
         f"=== ШАБЛОН ОТВЕТА (ЕСЛИ НЕТ ОПРОСА) ===\n"
-        f"||R:🔥|| <b>Заголовок</b>\n"
-        f"Текст...\n"
-        f"<blockquote><b>📌 Суть:</b> Вывод.</blockquote>\n"
+        f"||R:🔥|| <b>Заголовок</b>\n\n"
+        f"Текст новости...\n"
+        f"<blockquote>Вывод редактора.</blockquote>\n"
         f"|||\n"
         f"Prompt...\n\n"
+        
         f"=== ШАБЛОН ОТВЕТА (С ОПРОСОМ) ===\n"
-        f"||R:😱|| <b>Заголовок</b>\n"
-        f"Текст...\n"
-        f"<blockquote><b>📌 Суть:</b> Вывод.</blockquote>\n"
+        f"||R:😱|| <b>Заголовок</b>\n\n"
+        f"Текст новости...\n"
+        f"<blockquote>Вывод редактора.</blockquote>\n"
         f"||POLL||\n"
         f"Острый вопрос?\n"
         f"Да, это круто\n"
@@ -445,11 +447,16 @@ async def handler(event):
             stats_db.increment('published')
             print(f"✅ Пост опубликован! ID: {sent_msg.id}")
             
+            # --- СОХРАНЕНИЕ ИСТОРИИ (БЕЗ "СУТЬ:") ---
             essence = news_text
-            if "📌 Суть:" in news_text:
-                try: essence = news_text.split("📌 Суть:")[1].replace("</blockquote>", "").strip()
+            # Ищем текст внутри <blockquote> </blockquote>
+            if "<blockquote>" in news_text:
+                try: 
+                    # Берем то, что между тегами
+                    essence = news_text.split("<blockquote>")[1].split("</blockquote>")[0].strip()
                 except: pass
             save_to_history(essence)
+            # ----------------------------------------
             
             if reaction:
                 await asyncio.sleep(2)
