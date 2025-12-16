@@ -212,26 +212,46 @@ async def ask_gpt_direct(system_prompt, user_text):
     print(f"❌ GPT не ответил после 3 попыток. Последняя ошибка: {last_error}")
     return None
 
-# --- ГЕНЕРАЦИЯ КАРТИНКИ ---
+# --- ГЕНЕРАЦИЯ КАРТИНКИ (ОБНОВЛЕНО: ЛОГИ + HEADERS) ---
 async def generate_image(prompt_text):
     clean_prompt = prompt_text.replace('|||', '').replace('=== ПРОМПТ ===', '').strip()
     tech_suffix = " . Shot on Phase One XF IQ4, 150MP, ISO 100, f/8, crystal clear, sharp focus, professional stock photography, no grain, no blur, bright lighting."
     final_prompt = clean_prompt + tech_suffix
     encoded_prompt = urllib.parse.quote(final_prompt)
+    
     import random
     seed = random.randint(1, 1000000)
     filename = os.path.join(BASE_DIR, f"image_{seed}.jpg")
+    
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&model=flux&seed={seed}&nologo=true"
     
-    for _ in range(3):
+    # Добавляем User-Agent, чтобы не ловить 403 Forbidden
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+
+    for i in range(3):
         async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as http_client:
             try:
-                response = await http_client.get(url)
+                print(f"🎨 Попытка генерации фото ({i+1}/3)...")
+                response = await http_client.get(url, headers=headers)
+                
                 if response.status_code == 200:
                     with open(filename, "wb") as f: f.write(response.content)
-                    return filename
-            except: pass
+                    # Проверяем, что файл не пустой
+                    if os.path.getsize(filename) > 0:
+                        return filename
+                    else:
+                        print("⚠️ Скачан пустой файл изображения")
+                else:
+                    print(f"⚠️ Ошибка Pollinations API: {response.status_code}")
+                    
+            except Exception as e:
+                print(f"⚠️ Ошибка сети при генерации фото: {e}")
+            
             await asyncio.sleep(2)
+            
+    print("❌ Не удалось сгенерировать картинку после 3 попыток")
     return None
 
 # --- ПОДКАСТ ---
@@ -416,6 +436,7 @@ async def handler(event):
             if path_to_image and os.path.exists(path_to_image):
                 sent_msg = await client.send_file(DESTINATION, path_to_image, caption=news_text, parse_mode='html')
             else:
+                print("⚠️ Картинка не скачалась, отправляю текст")
                 sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
         else:
             sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
