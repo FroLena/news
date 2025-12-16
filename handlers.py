@@ -8,71 +8,63 @@ from services.news import process_news
 from services.image import generate_image
 
 def register_handlers(client):
-    # Включаем прослушку. Если SOURCE_CHANNELS пустой или с ошибкой - бот будет молчать.
     @client.on(events.NewMessage(chats=SOURCE_CHANNELS))
     async def main_handler(event):
-        # 1. СРАЗУ ПИШЕМ В ЛОГ, ЧТОБЫ ПОНЯТЬ, ЧТО СИГНАЛ ПРОШЕЛ
         try:
-            chat_title = "Unknown"
-            try:
-                chat = await event.get_chat()
-                chat_title = chat.title
-            except: pass
-            print(f"📨 ПОЛУЧЕНО СООБЩЕНИЕ из: {chat_title} | ID: {event.id}")
-        except Exception as e:
-            print(f"📨 ПОЛУЧЕНО СООБЩЕНИЕ (ошибка получения инфо о чате): {e}")
+            chat = await event.get_chat()
+            print(f"📨 NEW MSG: {chat.title}")
+        except: pass
 
         text = event.message.message
-        
-        # ЛОГИРУЕМ ТЕКСТ (первые 50 символов)
-        if text:
-            print(f"📝 Текст входящий: {text[:50]}...")
-        else:
-            print("📝 Текст входящий: ПУСТО (возможно только медиа)")
+        if not text or len(text) < 20: return
 
-        # Проверка длины
-        if not text or len(text) < 20: 
-            print("⚠️ ИГНОР: Текст короче 20 символов.")
-            return
-
-        # 2. Фильтр дублей (Локальный)
+        # 1. Фильтр дублей
         if is_duplicate(text):
-            print("♻️ ОТМЕНА: Найден Fuzzy-дубль (>65%)")
+            print("♻️ Fuzzy-дубль")
             stats_db.increment('rejected_dups')
             return
         
         stats_db.increment('scanned')
         
-        # 3. Рерайт (AI)
-        print("🧠 Отправляю запрос к GPT...")
+        # 2. GPT Рерайт
+        print("🧠 GPT думает...")
         full_response = await process_news(text)
         
         if not full_response:
-            print("❌ ОШИБКА: GPT вернул пустоту!")
+            print("❌ GPT вернул пустоту")
             stats_db.increment('rejected_other')
             return
 
-        print(f"🧠 Ответ GPT получен. Длина: {len(full_response)}")
+        # ОТЛАДКА: Показываем начало ответа, чтобы проверить наличие |||
+        print(f"🧠 GPT Ответ (первые 100): {full_response[:100]}...")
+        if "|||" in full_response:
+            print("✅ Разделитель картинки ||| найден!")
+        else:
+            print("⚠️ Разделитель ||| НЕ найден (картинки от GPT не будет)")
 
         if "DUPLICATE" in full_response:
             stats_db.increment('rejected_dups')
-            print("❌ ОТМЕНА: GPT определил дубль")
+            print("❌ GPT: Дубль")
             return
         if "SKIP" in full_response:
             stats_db.increment('rejected_ads')
-            print("🗑 ОТМЕНА: GPT определил мусор/рекламу")
+            print("🗑 GPT: Мусор")
             return
 
-        # 4. Парсинг ответа
+        # 3. Парсинг
         raw_text = full_response
         image_prompt = None
+        
+        # Разделяем текст и картинку
         if "|||" in full_response:
             parts = full_response.split("|||")
             news_text = parts[0].strip()
-            if len(parts) > 1: image_prompt = parts[1].strip()
+            if len(parts) > 1 and len(parts[1].strip()) > 5:
+                image_prompt = parts[1].strip()
         else:
             news_text = full_response.strip()
 
+        # Реакции
         reaction = None
         if "||R:" in news_text:
             try:
@@ -82,6 +74,7 @@ def register_handlers(client):
                 news_text = subparts[1].strip()
             except: pass
 
+        # Опросы
         poll_data = None
         if "||POLL||" in news_text:
             try:
@@ -93,43 +86,47 @@ def register_handlers(client):
                     poll_data = {"q": poll_lines[0], "o": poll_lines[1:]}
             except: pass
 
+        # Страховка для картинки: если GPT не дал промпт, но в оригинале было фото
         if not image_prompt and event.message.photo:
+            print("⚠️ GPT забыл промпт, генерирую из текста...")
             base_prompt = news_text.replace('\n', ' ')[:200]
             image_prompt = f"Commercial photo of {base_prompt}. Bright light, 8k sharp."
 
-        # 5. Отправка
+        # 4. Отправка
         sent_msg = None
         try:
             has_video = event.message.video is not None
             if has_video:
-                print("📹 Обнаружено видео, скачиваю...")
                 if event.message.file.size > MAX_VIDEO_SIZE:
-                    print("⚠️ Видео слишком большое, отправляю текстом.")
                     sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
                 else:
                     path_to_video = await event.download_media()
                     if path_to_video:
                         sent_msg = await client.send_file(DESTINATION, path_to_video, caption=news_text, parse_mode='html')
                         os.remove(path_to_video)
+            
             elif image_prompt:
-                print("🎨 Генерирую/скачиваю картинку...")
+                print(f"🎨 Рисуем: {image_prompt[:30]}...")
                 path_to_image = await generate_image(image_prompt)
                 if path_to_image and os.path.exists(path_to_image):
                     sent_msg = await client.send_file(DESTINATION, path_to_image, caption=news_text, parse_mode='html')
                     os.remove(path_to_image)
                 else:
-                    print("⚠️ Картинка не создалась, отправляю текст.")
+                    print("⚠️ Не удалось скачать фото, шлю текст.")
                     sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
             else:
                 sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
 
             if sent_msg:
                 stats_db.increment('published')
-                print(f"✅ УСПЕХ! Опубликовано. ID сообщения: {sent_msg.id}")
+                print(f"✅ ОПУБЛИКОВАНО! ID: {sent_msg.id}")
                 
+                # Чистим историю от тегов и скрепки для чистоты базы
                 essence = news_text
                 if "<blockquote>" in news_text:
-                    try: essence = news_text.split("<blockquote>")[1].split("</blockquote>")[0].strip()
+                    try: 
+                        raw_essence = news_text.split("<blockquote>")[1].split("</blockquote>")[0]
+                        essence = raw_essence.replace("📌", "").strip()
                     except: pass
                 save_to_history(essence)
                 
@@ -149,5 +146,5 @@ def register_handlers(client):
                         ))
                     except: pass
         except Exception as e:
-            print(f"❌ КРИТИЧЕСКАЯ ОШИБКА ОТПРАВКИ: {e}")
+            print(f"❌ ERROR: {e}")
             stats_db.increment('rejected_other')
