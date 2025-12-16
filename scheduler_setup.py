@@ -20,5 +20,5 @@ async def send_daily_report(client):
 def start_scheduler(client):
     scheduler = AsyncIOScheduler(event_loop=client.loop)
     scheduler.add_job(create_and_send_podcast, 'cron', hour=18, minute=0, args=[client])
-    scheduler.add_job(send_daily_report, CronTrigger(hour=0, minute=0, timezone=MSK_TZ), args=[client])
+    scheduler.add_job(send_daily_report, CronTrigger(hour=20, minute=00, timezone=MSK_TZ), args=[client])
     scheduler.start()
