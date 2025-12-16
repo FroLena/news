@@ -2,6 +2,7 @@ import sqlite3
 import json
 import time
 import os
+import difflib # Импортируем для сравнения
 from datetime import datetime
 from config import DB_PATH, HISTORY_FILE, MSK_TZ
 
@@ -12,6 +13,7 @@ class StatsManager:
         self._init_db()
 
     def _init_db(self):
+        # Таблица статистики
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS daily_stats (
                 date TEXT PRIMARY KEY,
@@ -22,8 +24,17 @@ class StatsManager:
                 rejected_other INTEGER DEFAULT 0
             )
         ''')
+        # НОВАЯ ТАБЛИЦА: Хранит сырые тексты входящих новостей
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS raw_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                text TEXT,
+                timestamp REAL
+            )
+        ''')
         self.conn.commit()
 
+    # --- СТАТИСТИКА ---
     def increment(self, field):
         today = datetime.now(MSK_TZ).strftime('%Y-%m-%d')
         try:
@@ -45,6 +56,39 @@ class StatsManager:
             }
         return None
 
+    # --- НОВАЯ ЛОГИКА ДУБЛЕЙ (ВЕЧНАЯ) ---
+    def check_and_add_raw_text(self, new_text):
+        """
+        1. Сравнивает новый текст со всеми за последние 24 часа.
+        2. Если находит совпадение > 60% — возвращает True (Дубль).
+        3. Если дубля нет — сохраняет текст в базу и возвращает False.
+        """
+        now = time.time()
+        # Чистим старье (старше 24 часов), чтобы база не тормозила
+        self.cursor.execute('DELETE FROM raw_history WHERE timestamp < ?', (now - 86400,))
+        self.conn.commit()
+
+        # Достаем последние 200 текстов для проверки
+        self.cursor.execute('SELECT text FROM raw_history ORDER BY id DESC LIMIT 200')
+        rows = self.cursor.fetchall()
+
+        # Сравниваем
+        for row in rows:
+            old_text = row[0]
+            # Fuzzy Match: Порог 0.60 (60% сходства)
+            matcher = difflib.SequenceMatcher(None, new_text, old_text)
+            if matcher.ratio() > 0.60:
+                return True # НАШЛИ ДУБЛЬ!
+
+        # Если не нашли — сохраняем
+        try:
+            self.cursor.execute('INSERT INTO raw_history (text, timestamp) VALUES (?, ?)', (new_text, now))
+            self.conn.commit()
+        except: pass
+        
+        return False
+
+# --- JSON ИСТОРИЯ (ДЛЯ GPT) ---
 def load_history():
     if not os.path.exists(HISTORY_FILE): return []
     try:
