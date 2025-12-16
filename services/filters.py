@@ -1,11 +1,7 @@
-import difflib
 import re
+from database import stats_db  # <--- Импортируем нашу базу данных
 
-# Кэш в памяти (хранит последние 50 входящих текстов)
-_raw_text_cache = []
-
-# "РАССТРЕЛЬНЫЙ СПИСОК" (Регулярные выражения)
-# Если бот увидит это во входящем тексте — сразу в мусорку.
+# "РАССТРЕЛЬНЫЙ СПИСОК" (Оставил без изменений, как ты просил)
 STOP_PATTERNS = [
     r"erid:",                # Маркировка рекламы
     r"2sub\.org",            # Ссылки-прокладки
@@ -34,19 +30,9 @@ def check_stop_words(text):
 
 def is_duplicate(text):
     """
-    Проверяет текст на схожесть с кэшем (Fuzzy Match).
+    Проверяет текст на схожесть через базу данных (Вечная память).
     """
-    global _raw_text_cache
-    
-    # 1. Сравнение
-    for old_text in _raw_text_cache:
-        matcher = difflib.SequenceMatcher(None, text, old_text)
-        if matcher.ratio() > 0.65: # 65% сходства
-            return True
-            
-    # 2. Обновление кэша
-    _raw_text_cache.append(text)
-    if len(_raw_text_cache) > 50:
-        _raw_text_cache.pop(0)
-        
-    return False
+    # Мы больше не храним список здесь. Мы отдаем текст в базу.
+    # База сама сравнит его с историей за 24 часа.
+    # Если вернет True — значит дубль.
+    return stats_db.check_and_add_raw_text(text)
