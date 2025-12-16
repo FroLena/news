@@ -3,7 +3,8 @@ import asyncio
 from telethon import events, types, functions
 from config import SOURCE_CHANNELS, DESTINATION, MAX_VIDEO_SIZE
 from database import stats_db, save_to_history
-from services.filters import is_duplicate
+# ИМПОРТИРУЕМ НОВУЮ ФУНКЦИЮ check_stop_words
+from services.filters import is_duplicate, check_stop_words 
 from services.news import process_news
 from services.image import generate_image
 
@@ -18,15 +19,22 @@ def register_handlers(client):
         text = event.message.message
         if not text or len(text) < 20: return
 
-        # 1. Фильтр дублей
+        # --- ЭТАП 0: ЖЕСТКИЙ ФИЛЬТР РЕКЛАМЫ (БЕСПЛАТНО) ---
+        if check_stop_words(text):
+            print("🛑 STOP-WORD: Найдена явная реклама или мусор")
+            stats_db.increment('rejected_ads')
+            return
+        # --------------------------------------------------
+
+        # 1. Фильтр дублей (Локальный Fuzzy)
         if is_duplicate(text):
-            print("♻️ Fuzzy-дубль")
+            print("♻️ Fuzzy-дубль (>65%)")
             stats_db.increment('rejected_dups')
             return
         
         stats_db.increment('scanned')
         
-        # 2. GPT Рерайт
+        # 2. Рерайт (AI)
         print("🧠 GPT думает...")
         full_response = await process_news(text)
         
@@ -35,12 +43,8 @@ def register_handlers(client):
             stats_db.increment('rejected_other')
             return
 
-        # ОТЛАДКА: Показываем начало ответа, чтобы проверить наличие |||
-        print(f"🧠 GPT Ответ (первые 100): {full_response[:100]}...")
-        if "|||" in full_response:
-            print("✅ Разделитель картинки ||| найден!")
-        else:
-            print("⚠️ Разделитель ||| НЕ найден (картинки от GPT не будет)")
+        # ОТЛАДКА:
+        # print(f"🧠 Ответ: {full_response[:50]}...") 
 
         if "DUPLICATE" in full_response:
             stats_db.increment('rejected_dups')
@@ -55,7 +59,6 @@ def register_handlers(client):
         raw_text = full_response
         image_prompt = None
         
-        # Разделяем текст и картинку
         if "|||" in full_response:
             parts = full_response.split("|||")
             news_text = parts[0].strip()
@@ -64,7 +67,6 @@ def register_handlers(client):
         else:
             news_text = full_response.strip()
 
-        # Реакции
         reaction = None
         if "||R:" in news_text:
             try:
@@ -74,7 +76,6 @@ def register_handlers(client):
                 news_text = subparts[1].strip()
             except: pass
 
-        # Опросы
         poll_data = None
         if "||POLL||" in news_text:
             try:
@@ -86,9 +87,8 @@ def register_handlers(client):
                     poll_data = {"q": poll_lines[0], "o": poll_lines[1:]}
             except: pass
 
-        # Страховка для картинки: если GPT не дал промпт, но в оригинале было фото
         if not image_prompt and event.message.photo:
-            print("⚠️ GPT забыл промпт, генерирую из текста...")
+            print("⚠️ GPT забыл промпт, генерирую авто...")
             base_prompt = news_text.replace('\n', ' ')[:200]
             image_prompt = f"Commercial photo of {base_prompt}. Bright light, 8k sharp."
 
@@ -112,7 +112,7 @@ def register_handlers(client):
                     sent_msg = await client.send_file(DESTINATION, path_to_image, caption=news_text, parse_mode='html')
                     os.remove(path_to_image)
                 else:
-                    print("⚠️ Не удалось скачать фото, шлю текст.")
+                    print("⚠️ Фото не вышло, шлю текст.")
                     sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
             else:
                 sent_msg = await client.send_message(DESTINATION, news_text, parse_mode='html')
@@ -121,7 +121,7 @@ def register_handlers(client):
                 stats_db.increment('published')
                 print(f"✅ ОПУБЛИКОВАНО! ID: {sent_msg.id}")
                 
-                # Чистим историю от тегов и скрепки для чистоты базы
+                # Чистка и сохранение истории
                 essence = news_text
                 if "<blockquote>" in news_text:
                     try: 
