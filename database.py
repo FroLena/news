@@ -57,36 +57,49 @@ class StatsManager:
         return None
 
     # --- НОВАЯ ЛОГИКА ДУБЛЕЙ (ВЕЧНАЯ) ---
+        # --- ВНУТРИ КЛАССА StatsManager в database.py ---
+
     def check_and_add_raw_text(self, new_text):
         """
-        1. Сравнивает новый текст со всеми за последние 24 часа.
-        2. Если находит совпадение > 60% — возвращает True (Дубль).
-        3. Если дубля нет — сохраняет текст в базу и возвращает False.
+        Проверяет, был ли такой текст раньше.
+        Возвращает True (Дубль), если находит похожий.
+        Иначе сохраняет и возвращает False.
         """
         now = time.time()
-        # Чистим старье (старше 24 часов), чтобы база не тормозила
-        self.cursor.execute('DELETE FROM raw_history WHERE timestamp < ?', (now - 86400,))
+        
+        # 1. Сначала чистим совсем старье (старше 48 часов), чтобы база не пухла
+        # Но держим память дольше (было 24 часа)
+        self.cursor.execute('DELETE FROM raw_history WHERE timestamp < ?', (now - 172800,))
         self.conn.commit()
 
-        # Достаем последние 200 текстов для проверки
-        self.cursor.execute('SELECT text FROM raw_history ORDER BY id DESC LIMIT 200')
+        # 2. Достаем последние 500 текстов (было 200)
+        # Это защитит от частого постинга одной и той же новости в разных каналах
+        self.cursor.execute('SELECT text FROM raw_history ORDER BY id DESC LIMIT 500')
         rows = self.cursor.fetchall()
 
-        # Сравниваем
+        # 3. Сравниваем
         for row in rows:
             old_text = row[0]
-            # Fuzzy Match: Порог 0.60 (60% сходства)
-            matcher = difflib.SequenceMatcher(None, new_text, old_text)
-            if matcher.ratio() > 0.60:
-                return True # НАШЛИ ДУБЛЬ!
+            
+            # Быстрая проверка на полное совпадение (хэши)
+            if new_text == old_text:
+                return True
 
-        # Если не нашли — сохраняем
+            # Fuzzy Match: 
+            # Понижаем порог до 0.50 (50%). 
+            # Если тексты похожи хотя бы наполовину — считаем дублем.
+            matcher = difflib.SequenceMatcher(None, new_text, old_text)
+            if matcher.ratio() > 0.50:
+                return True 
+
+        # 4. Если дубля нет — сохраняем "Сырой" текст
         try:
             self.cursor.execute('INSERT INTO raw_history (text, timestamp) VALUES (?, ?)', (new_text, now))
             self.conn.commit()
         except: pass
         
         return False
+
 
 # --- JSON ИСТОРИЯ (ДЛЯ GPT) ---
 def load_history():
